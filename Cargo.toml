@@ -1,0 +1,18 @@
+[package]
+name = "retro_speed_bot"
+version = "0.1.0"
+authors = ["Alexander <ancorwin@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+twilight-cache-inmemory = "0.3"
+twilight-gateway = "0.3"
+twilight-http = "0.3"
+twilight-model = "0.3"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "sync", "fs", "io-util"] }
+futures = "0.3.14"
+twilight-command-parser = "0.3"
+
+derive_builder = "0.10.2"
