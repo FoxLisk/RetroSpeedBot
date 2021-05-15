@@ -1,30 +1,41 @@
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use futures::stream::StreamExt;
 use tokio::sync::RwLock;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
 use twilight_command_parser::{Command, CommandParserConfig, Parser};
-use twilight_gateway::{Cluster, Event};
 use twilight_gateway::cluster::ShardScheme;
+use twilight_gateway::{Cluster, Event};
 use twilight_http::{Client as HttpClient, Client};
+use twilight_model::gateway::payload::GuildCreate;
 use twilight_model::gateway::Intents;
-use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::guild::{Permissions, Role};
 use twilight_model::id::{ChannelId, GuildId, RoleId, UserId};
 
 use super::constants::DISCORD_TOKEN;
-use twilight_http::request::guild::role::CreateRole;
 use crate::constants::FOXLISK_USER_ID;
+use regex::Regex;
+use tokio::time::Duration;
+use twilight_http::request::guild::role::CreateRole;
+use twilight_model::channel::Message;
+
+const SCHEDULE_PATTERN: &str = r"There is a (?P<Game>.*) [rR]ace.*
+(?P<Weekday>\w+), (?P<Month>) (?P<Day>\d+) at (?P<Hour>\d+):(?P<Minute>\d+) (?P<TZ>\w+)
+(?P<Other>.*)";
 
 struct BotState {
     http: Client,
     cluster: Cluster,
     cache: InMemoryCache,
     parser: Parser<'static>,
-    // this should be split by guild
+
+    // these should be split by guild
     roles: RwLock<HashMap<String, Role>>,
+    channels: RwLock<HashMap<String, ChannelId>>,
 }
 
 /*
@@ -103,16 +114,11 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         cluster_spawn.up().await;
     });
 
-    // HTTP is separate from the gateway, so create a new client.
-    let http = HttpClient::new(DISCORD_TOKEN);
-
-    // Since we only care about new messages, make the cache only
-    // cache new messages.
+    let http_client = HttpClient::new(DISCORD_TOKEN);
 
     let cache = InMemoryCache::builder()
         .resource_types(
             ResourceType::MESSAGE
-                | ResourceType::VOICE_STATE
                 | ResourceType::GUILD
                 | ResourceType::CHANNEL
                 | ResourceType::MEMBER
@@ -121,28 +127,41 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         )
         .build();
 
-    let mut config = CommandParserConfig::new();
+    let mut command_config = CommandParserConfig::new();
 
     // (Use `Config::add_command` to add a single command)
-    config.add_command("bot", true);
-    config.add_prefix("!");
+    command_config.add_command("bot", true);
+    command_config.add_prefix("!");
 
-    let parser = Parser::new(config);
-
-    // let shard_count = cluster.shards().len();
+    let parser = Parser::new(command_config);
 
     let bot_state = Arc::new(BotState {
-        http,
+        http: http_client,
         cluster,
         cache,
         parser,
         roles: Default::default(),
+        channels: Default::default(),
     });
 
     let jh = tokio::spawn(handle_events(bot_state.clone()));
+
     jh.await.unwrap().unwrap();
     Ok(())
 }
+
+struct Schedule {}
+
+#[derive(Debug)]
+struct ScheduleError;
+
+impl Display for ScheduleError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "bzzt")
+    }
+}
+
+impl Error for ScheduleError {}
 
 async fn handle_events(bot_state: Arc<BotState>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut events = bot_state.cluster.events();
@@ -161,7 +180,7 @@ async fn handle_wrapper(
     match handle_event(event, bot_state).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            println!("Unhandled error: {:?}", e.to_string());
+            warn!("Unhandled error: {:?}", e.to_string());
             Err(e)
         }
     }
@@ -173,11 +192,17 @@ async fn handle_event(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match event {
         Event::GuildCreate(msg) => {
-            setup_roles(msg, bot_state.clone()).await;
+            setup_roles(&msg, bot_state.clone()).await;
+            setup_channels(&msg, bot_state.clone()).await;
+        }
+        Event::ChannelUpdate(cu) => {
+            // probably we could iterate thru bot_state.channels and change the key on the one
+            // with the value matching this one. or maintain an id -> name map and use that
+            // instead of iterating. otherwise *shrug*
+            debug!("Channel update - should i care? {:?}", cu);
         }
         Event::MessageCreate(msg) => match bot_state.parser.parse(msg.content.as_str()) {
             Some(Command { name: "bot", .. }) => {
-                println!("{:?}", msg);
                 bot_state
                     .http
                     .create_message(msg.channel_id)
@@ -187,10 +212,7 @@ async fn handle_event(
             _ => {}
         },
         Event::ShardConnected(_) => {
-            println!("Discord: Shard connected!");
-        }
-        Event::VoiceStateUpdate(msg) => {
-            println!("Discord: Voice State Update {:?}", msg);
+            debug!("Discord: Shard connected!");
         }
         Event::GatewayHeartbeatAck => {}
         _ => {}
@@ -199,11 +221,18 @@ async fn handle_event(
     Ok(())
 }
 
-
-async fn setup_roles(guild: Box<GuildCreate>, bot_state: Arc<BotState>) {
-    for role in &guild.roles {
-        println!("role: {:?}", role);
+async fn setup_channels(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
+    let mut lock = bot_state.channels.write().await;
+    for c in &guild.channels {
+        debug!("Inserting channel `{}`", c.name());
+        lock.insert(c.name().to_string(), c.id());
     }
+}
+
+async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
+    // for role in &guild.roles {
+    // println!("role: {:?}", role);
+    // }
     // let role_perms = Permissions::
     // let role_perms = PERM
     let desired_roles = vec![DesiredRoleBuilder::default()
@@ -222,7 +251,7 @@ async fn setup_roles(guild: Box<GuildCreate>, bot_state: Arc<BotState>) {
         if desired_roles_by_name.contains_key(&role.name) {
             let desired = desired_roles_by_name.get(&role.name).unwrap();
             if !desired.matches(role) {
-                println!("Non-matching role found!! wtf {:?}", role);
+                warn!("Non-matching role found!! wtf {:?}", role);
             } else {
                 desired_roles_by_name.remove(&role.name);
                 {
@@ -234,17 +263,28 @@ async fn setup_roles(guild: Box<GuildCreate>, bot_state: Arc<BotState>) {
     }
 
     for desired in desired_roles_by_name.values() {
-    let c = bot_state.http.create_role(guild.id);
-        println!("Creating role {:?}", desired);
-        match desired.create(c).await{
-            Ok(o) => {
-                println!("Successful!");
+        let c = bot_state.http.create_role(guild.id);
+        info!("Creating role {:?}", desired);
+        match desired.create(c).await {
+            Ok(_) => {
+                debug!("Successfuly created role!");
             }
-            Err(e) => {println!("Error creating role: {:?}", e);}
+            Err(e) => {
+                warn!("Error creating role: {:?}", e);
+            }
         }
     }
 
     for er in bot_state.roles.read().await.values() {
-        bot_state.http.add_guild_member_role(guild.id, UserId::from(FOXLISK_USER_ID), er.id).await;
+        match bot_state
+            .http
+            .add_guild_member_role(guild.id, UserId::from(FOXLISK_USER_ID), er.id)
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("Failed to assign to role: {:?}", e);
+            }
+        }
     }
 }
