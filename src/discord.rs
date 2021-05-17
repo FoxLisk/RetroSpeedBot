@@ -19,12 +19,12 @@ use super::constants::DISCORD_TOKEN;
 use crate::constants::FOXLISK_USER_ID;
 use twilight_http::request::guild::role::CreateRole;
 
-use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
-use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
-use sqlx::{Row, SqlitePool};
+use sqlx::sqlite::{SqlitePoolOptions};
+use sqlx::{SqlitePool};
 
 struct BotState {
     http: Client,
@@ -339,7 +339,7 @@ async fn _add_race(mut args: Arguments<'_>, pool: &SqlitePool) -> String {
         }
     };
 
-    let race = match create_race(&game, &cat, occurs, pool).await {
+    match create_race(&game, &cat, occurs, pool).await {
         Some(r) => {
             r
         }
@@ -422,26 +422,6 @@ async fn list_games(msg: &Box<MessageCreate>, bot_state: Arc<BotState>, pool: &S
         .await;
 }
 
-macro_rules! get_col {
-    ($row:ident, $colname:expr) => {
-        match $row.try_get($colname) {
-            Ok(got) => got,
-            Err(e) => {
-                error!("Parsing error {:?}", e);
-                return Err(ParseError);
-            }
-        };
-    };
-}
-
-struct ParseError;
-
-trait FromRow {
-    fn from_row(row: &SqliteRow) -> Result<Self, ParseError>
-    where
-        Self: Sized;
-}
-
 // Would love to have a real ORM... oh well
 // it's probably actually better to have id: Option<i64> so we can create models that aren't
 // DB-backed
@@ -452,30 +432,7 @@ struct Game {
     name_pretty: String,
 }
 
-impl Game {
-    fn try_new(id: i64, name: String, name_pretty: String) -> Option<Self> {
-        Some(Game {
-            id: id,
-            name: name,
-            name_pretty,
-        })
-    }
-}
 
-impl FromRow for Game {
-    fn from_row(row: &SqliteRow) -> Result<Self, ParseError> {
-        // TODO: this match row... thing should be a macro prolly
-        let id: i64 = get_col!(row, "id");
-        let name: String = get_col!(row, "name");
-        let name_pretty: String = get_col!(row, "name_pretty");
-
-        Ok(Self {
-            id,
-            name,
-            name_pretty,
-        })
-    }
-}
 
 // TODO: hmmm... how to handle FKs? i think *for now* it's fine to just do stuff top down.
 //       probably eventually we want some kind of hydration
@@ -486,39 +443,6 @@ struct Category {
     name_pretty: String,
 }
 
-impl FromRow for Category {
-    fn from_row(row: &SqliteRow) -> Result<Self, ParseError>
-    where
-        Self: Sized,
-    {
-        let id: i64 = get_col!(row, "id");
-        let game_id: i64 = get_col!(row, "game_id");
-        let name: String = get_col!(row, "name");
-        let name_pretty: String = get_col!(row, "name_pretty");
-        Ok(Self {
-            id,
-            game_id,
-            name,
-            name_pretty,
-        })
-    }
-}
-
-impl Category {
-    fn try_new(
-        id: Option<i64>,
-        game_id: Option<i64>,
-        name: Option<String>,
-        name_pretty: Option<String>,
-    ) -> Option<Self> {
-        Some(Category {
-            id: id.unwrap(),
-            game_id: game_id.unwrap(),
-            name: name.unwrap(),
-            name_pretty: name_pretty.unwrap(),
-        })
-    }
-}
 
 struct Race {
     id: i64,
@@ -526,27 +450,6 @@ struct Race {
     category_id: i64,
     occurs: DateTime<Tz>,
 }
-//
-// impl FromRow for Race {
-//     fn from_row(row: &SqliteRow) -> Result<Self, ParseError>
-//     where
-//         Self: Sized,
-//     {
-//         let id: i64 = get_col!(row, "id");
-//
-//         let game_id: i64 = get_col!(row, "game_id");
-//
-//         let category_id: i64 = get_col!(row, "category_id");
-//         let occurs: i64 = get_col!(row, "occurs");
-//
-//         Ok(Self {
-//             id,
-//             game_id,
-//             category_id,
-//             occurs: Utc.timestamp(occurs, 0),
-//         })
-//     }
-// }
 
 async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
     let q = sqlx::query_as!(
@@ -582,21 +485,17 @@ async fn get_category(game: &Game, name: &str, pool: &SqlitePool) -> Option<Cate
 }
 
 async fn get_games(pool: &SqlitePool) -> Vec<Game> {
-    let q = sqlx::query("SELECT id, name, name_pretty FROM game");
+    let q = sqlx::query_as!(Game, "SELECT id, name, name_pretty FROM game");
     let mut rows = q.fetch(pool);
     let mut games = vec![];
     while let r = rows.try_next().await {
         match r {
-            Ok(maybe_row) => match maybe_row {
-                Some(row) => {
-                    if let Ok(g) = Game::from_row(&row) {
-                        games.push(g);
-                    }
+            Ok(mg) => {
+                match mg {
+                    Some(g) => { games.push(g); }
+                    None => { break; }
                 }
-                None => {
-                    break;
-                }
-            },
+            }
             Err(e) => {
                 warn!("Error fetching row: {:?}", e);
             }
@@ -609,16 +508,16 @@ async fn get_games(pool: &SqlitePool) -> Vec<Game> {
 async fn get_categories(game: &Game, pool: &SqlitePool) -> Vec<Category> {
     // TODO: switch to query_as!
     debug!("Getting categories for game (name {} id {})", game.name, game.id);
-    let q = sqlx::query("SELECT id, game_id, name, name_pretty  FROM category WHERE game_id = ?").bind(game.id);
+    let q = sqlx::query_as!(Category, "SELECT id, game_id, name, name_pretty  FROM category WHERE game_id = ?", game.id);
     let mut rows = q.fetch(pool);
     let mut categories = vec![];
     while let r = rows.try_next().await {
         match r {
-            Ok(maybe_row) => match maybe_row {
-                Some(row) => {
-                    if let Ok(g) = Category::from_row(&row) {
-                        categories.push(g);
-                    }
+            Ok(mc) => match mc {
+                Some(c) => {
+
+                        categories.push(c);
+
                 }
                 None => {
                     break;
@@ -701,6 +600,7 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
     }
 }
 
+#[cfg(test)]
 mod test {
     use crate::discord::parse_time;
     use chrono::{Datelike, NaiveDateTime, Timelike};
