@@ -429,7 +429,7 @@ async fn _add_race(
     };
 
     let schedule_content = format!(
-        "There will be a race of {} - {} on {}.\
+        "There will be a race of {} - {} on {}.
 If you are racing, react with {}
 If you are available to commentate, react with :microphone2:
 If you are able to restream, react with :tv:",

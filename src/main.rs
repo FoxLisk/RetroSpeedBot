@@ -36,7 +36,10 @@ critical path TODOs:
 
  * some sort of way to sync the messages w/ the races
    * perhaps the race table should have a channel/message id of the associated message?
-   * perhaps
+ * actually do stuff when race time is getting closer
+   * probably have some every-minute or every-5-minutes thing that checks if there's a race
+     coming up, and if so finds it in the scheduling channel and does stuff with the reacts
+     
 
 misc TODOs - not any special order:
 
