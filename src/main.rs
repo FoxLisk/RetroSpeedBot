@@ -5,6 +5,8 @@ mod constants;
 
 mod discord;
 
+extern crate chrono;
+extern crate chrono_tz;
 
 #[macro_use]
 extern crate derive_builder;
@@ -16,6 +18,7 @@ extern crate env_logger;
 #[tokio::main]
 async fn main() {
     env_logger::init();
+
     let url = format!(
         "https://discord.com/oauth2/authorize?client_id={}&scope=bot&permissions={}",
         CLIENT_ID, PERMISSIONS

@@ -18,4 +18,12 @@ regex = "1"
 log = "0.4.14"
 env_logger = "0.8.3"
 
+serde_json = "1.0"
 derive_builder = "0.10.2"
+sqlx = { version = "0.5", features = [ "runtime-tokio-rustls" , "sqlite", "chrono"] }
+chrono = "0.4"
+chrono-tz = "0.5"
+
+[build-dependencies]
+sqlx = { version = "0.5", features = ["runtime-tokio-rustls" , "sqlite",] }
+tokio = { version = "1.0", features = ["macros", ] }

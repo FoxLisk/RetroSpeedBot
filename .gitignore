@@ -1,2 +1,5 @@
 /target
 src/constants.rs
+test_db.db3
+test_db.db3-shm
+test_db.db3-wal

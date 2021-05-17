@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS game
+(
+    id          INTEGER PRIMARY KEY NOT NULL,
+    name        TEXT UNIQUE NOT NULL,
+    name_pretty TEXT UNIQUE NOT NULL
+);
