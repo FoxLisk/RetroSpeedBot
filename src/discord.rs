@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::error::Error;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Permissions, Role};
-use twilight_model::id::{ChannelId, UserId};
+use twilight_model::id::{ChannelId, UserId, RoleId};
 
 use super::constants::DISCORD_TOKEN;
 use crate::constants::FOXLISK_USER_ID;
@@ -23,8 +23,10 @@ use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
-use sqlx::sqlite::{SqlitePoolOptions};
-use sqlx::{SqlitePool};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
+use std::fmt::Formatter;
+use std::iter::FromIterator;
 
 struct BotState {
     http: Client,
@@ -158,7 +160,6 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 async fn handle_events(bot_state: Arc<BotState>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // TODO: maybe a nicer error lol
     let sqlite_db_path = var("SQLITE_DB_PATH").unwrap();
     // use a SqliteConnectOptions instead of a hardcoded queryparam?
     let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
@@ -272,7 +273,11 @@ async fn _list_categories(mut args: Arguments<'_>, pool: &SqlitePool) -> String 
     let categories = get_categories(&game, pool).await;
 
     let mut msg_parts = vec![format!("Available categories for {}:", game.name_pretty)];
-    msg_parts.extend(categories.iter().map(|c| format!("* {} ({})", c.name_pretty, c.name)));
+    msg_parts.extend(
+        categories
+            .iter()
+            .map(|c| format!("* {} ({})", c.name_pretty, c.name)),
+    );
 
     msg_parts.join("\n")
 }
@@ -283,6 +288,34 @@ async fn add_race(
     bot_state: Arc<BotState>,
     pool: &SqlitePool,
 ) {
+    // note: this is mega annoying and probably pretty slow to do in here.
+    let user_roles: HashSet<RoleId> = HashSet::from_iter( msg.member.as_ref().unwrap().roles.iter().cloned());
+    let guild_roles = bot_state.cache.guild_roles(msg.guild_id.unwrap()).unwrap();
+    let mut valid_role_names = HashSet::new();
+    valid_role_names.insert("Moderator".to_owned());
+    valid_role_names.insert("Admin".to_owned());
+
+
+    let mut permitted = false;
+    for r in &guild_roles {
+        let role = bot_state.cache.role(r.clone()).unwrap();
+        if valid_role_names.contains(&role.name) && user_roles.contains(&role.id) {
+            permitted = true;
+            break;
+        }
+    }
+
+    if ! permitted {
+        bot_state
+            .http
+            .create_message(msg.channel_id)
+            .content("You are not authorized to create races.")
+            .unwrap()
+            .await;
+        return;
+    }
+
+
     let contents = _add_race(args, pool).await;
     bot_state
         .http
@@ -340,16 +373,18 @@ async fn _add_race(mut args: Arguments<'_>, pool: &SqlitePool) -> String {
     };
 
     match create_race(&game, &cat, occurs, pool).await {
-        Some(r) => {
-            r
-        }
+        Some(r) => r,
         None => {
             return "Unknown error creating the race. Bug Fox about it.".to_owned();
         }
-
     };
 
-    format!("A new race has been created: {} - {} at {}", game.name_pretty, cat.name_pretty, occurs.format("%A, %B %d at %I:%M%p"))
+    format!(
+        "A new race has been created: {} - {} at {}",
+        game.name_pretty,
+        cat.name_pretty,
+        occurs.format("%A, %B %d at %I:%M%p")
+    )
 }
 
 async fn create_race(
@@ -364,7 +399,7 @@ async fn create_race(
         Ok(e) => {
             debug!("create_race got me a {:?}", e);
             Some(Race {
-              id: e.rowid as i64,
+                id: e.rowid as i64,
                 game_id: game.id,
                 category_id: category.id,
                 occurs,
@@ -375,7 +410,6 @@ async fn create_race(
             None
         }
     }
-
 }
 
 fn parse_time(time_str: &str) -> Option<DateTime<Tz>> {
@@ -432,8 +466,6 @@ struct Game {
     name_pretty: String,
 }
 
-
-
 // TODO: hmmm... how to handle FKs? i think *for now* it's fine to just do stuff top down.
 //       probably eventually we want some kind of hydration
 struct Category {
@@ -442,7 +474,6 @@ struct Category {
     name: String,
     name_pretty: String,
 }
-
 
 struct Race {
     id: i64,
@@ -467,7 +498,10 @@ async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
 }
 
 async fn get_category(game: &Game, name: &str, pool: &SqlitePool) -> Option<Category> {
-    debug!("Getting category {} for game (name {} id {}) ", name, game.name, game.id);
+    debug!(
+        "Getting category {} for game (name {} id {}) ",
+        name, game.name, game.id
+    );
     let q = sqlx::query_as!(
         Category,
         "SELECT id, game_id, name, name_pretty FROM category WHERE name = ? AND game_id = ?",
@@ -490,12 +524,14 @@ async fn get_games(pool: &SqlitePool) -> Vec<Game> {
     let mut games = vec![];
     while let r = rows.try_next().await {
         match r {
-            Ok(mg) => {
-                match mg {
-                    Some(g) => { games.push(g); }
-                    None => { break; }
+            Ok(mg) => match mg {
+                Some(g) => {
+                    games.push(g);
                 }
-            }
+                None => {
+                    break;
+                }
+            },
             Err(e) => {
                 warn!("Error fetching row: {:?}", e);
             }
@@ -506,18 +542,22 @@ async fn get_games(pool: &SqlitePool) -> Vec<Game> {
 }
 
 async fn get_categories(game: &Game, pool: &SqlitePool) -> Vec<Category> {
-    // TODO: switch to query_as!
-    debug!("Getting categories for game (name {} id {})", game.name, game.id);
-    let q = sqlx::query_as!(Category, "SELECT id, game_id, name, name_pretty  FROM category WHERE game_id = ?", game.id);
+    debug!(
+        "Getting categories for game (name {} id {})",
+        game.name, game.id
+    );
+    let q = sqlx::query_as!(
+        Category,
+        "SELECT id, game_id, name, name_pretty  FROM category WHERE game_id = ?",
+        game.id
+    );
     let mut rows = q.fetch(pool);
     let mut categories = vec![];
     while let r = rows.try_next().await {
         match r {
             Ok(mc) => match mc {
                 Some(c) => {
-
-                        categories.push(c);
-
+                    categories.push(c);
                 }
                 None => {
                     break;

@@ -27,3 +27,11 @@ async fn main() {
     let jh = tokio::spawn(run_bot());
     jh.await.unwrap().unwrap();
 }
+
+/*
+TODOs - not any special order:
+
+ * Rate limit the bot
+
+
+ */
