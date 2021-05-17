@@ -13,10 +13,10 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Permissions, Role};
-use twilight_model::id::{ChannelId, UserId, RoleId};
+use twilight_model::id::{ChannelId, EmojiId, RoleId, UserId};
 
 use super::constants::DISCORD_TOKEN;
-use crate::constants::FOXLISK_USER_ID;
+use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
 use twilight_http::request::guild::role::CreateRole;
 
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
@@ -25,18 +25,18 @@ use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
-use std::fmt::Formatter;
 use std::iter::FromIterator;
+use twilight_model::channel::ChannelType;
 
 struct BotState {
     http: Client,
     cluster: Cluster,
     cache: InMemoryCache,
     parser: Parser<'static>,
-
     // these should be split by guild
     roles: RwLock<HashMap<String, Role>>,
     channels: RwLock<HashMap<String, ChannelId>>,
+    emojis: RwLock<HashMap<String, EmojiId>>,
 }
 
 /*
@@ -148,6 +148,7 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         parser,
         roles: Default::default(),
         channels: Default::default(),
+        emojis: Default::default(),
     });
 
     // let (queries_send, queries_recv) = tokio::sync::mpsc::channel(1000);
@@ -201,6 +202,7 @@ async fn handle_event(
         Event::GuildCreate(msg) => {
             setup_roles(&msg, bot_state.clone()).await;
             setup_channels(&msg, bot_state.clone()).await;
+            setup_emojis(&msg, bot_state.clone()).await;
         }
         Event::ChannelUpdate(cu) => {
             // probably we could iterate thru bot_state.channels and change the key on the one
@@ -289,12 +291,12 @@ async fn add_race(
     pool: &SqlitePool,
 ) {
     // note: this is mega annoying and probably pretty slow to do in here.
-    let user_roles: HashSet<RoleId> = HashSet::from_iter( msg.member.as_ref().unwrap().roles.iter().cloned());
+    let user_roles: HashSet<RoleId> =
+        HashSet::from_iter(msg.member.as_ref().unwrap().roles.iter().cloned());
     let guild_roles = bot_state.cache.guild_roles(msg.guild_id.unwrap()).unwrap();
     let mut valid_role_names = HashSet::new();
     valid_role_names.insert("Moderator".to_owned());
     valid_role_names.insert("Admin".to_owned());
-
 
     let mut permitted = false;
     for r in &guild_roles {
@@ -305,7 +307,7 @@ async fn add_race(
         }
     }
 
-    if ! permitted {
+    if !permitted {
         bot_state
             .http
             .create_message(msg.channel_id)
@@ -315,59 +317,90 @@ async fn add_race(
         return;
     }
 
-
-    let contents = _add_race(args, pool).await;
+    let (reply, schedule) = _add_race(args, bot_state.clone(), pool).await;
     bot_state
         .http
         .create_message(msg.channel_id)
-        .content(contents)
+        .content(reply)
         .unwrap()
         .await;
+
+    if let Some(schedule_message) = schedule {
+        let schedule_channel_id = {
+            let lock = bot_state.channels.read().await;
+            match lock.get(SCHEDULING_CHANNEL_NAME) {
+                None => {
+                    warn!("No scheduling channel found");
+                    None
+                }
+                Some(cid) => Some(cid.clone()),
+            }
+        };
+        if let Some(cid) = schedule_channel_id {
+            bot_state
+                .http
+                .create_message(cid)
+                .content(schedule_message)
+                .unwrap()
+                .await;
+        }
+    }
+    // let scheuld_message = format!("There is a race for {} at {}. "
 }
 
-async fn _add_race(mut args: Arguments<'_>, pool: &SqlitePool) -> String {
+async fn _add_race(
+    mut args: Arguments<'_>,
+    bot_state: Arc<BotState>,
+    pool: &SqlitePool,
+) -> (String, Option<String>) {
     let syntax_error = "Please use the following format: !newrace <game alias> <category alias> <time>. For example: `!newrace alttp ms 6/9/2021 11:00pm. *Convert to Eastern time first*";
     let game_name = match args.next() {
         Some(game) => game,
         None => {
-            return syntax_error.to_owned();
+            return (syntax_error.to_owned(), None);
         }
     };
 
     let cat_name = match args.next() {
         Some(cat) => cat,
         None => {
-            return syntax_error.to_owned();
+            return (syntax_error.to_owned(), None);
         }
     };
 
     let time = match args.into_remainder() {
         Some(t) => t,
         None => {
-            return syntax_error.to_owned();
+            return (syntax_error.to_owned(), None);
         }
     };
 
     let occurs = match parse_time(time) {
         Some(dt) => dt,
         None => {
-            return syntax_error.to_owned();
+            return (syntax_error.to_owned(), None);
         }
     };
 
     let game = match get_game(game_name, pool).await {
         Some(g) => g,
         None => {
-            return "No game found with that name. Try !listgames".to_owned();
+            return (
+                "No game found with that name. Try !listgames".to_owned(),
+                None,
+            );
         }
     };
 
     let cat = match get_category(&game, cat_name, pool).await {
         Some(c) => c,
         None => {
-            return format!(
-                "No matching category found. try !listcategories {}",
-                game.name
+            return (
+                format!(
+                    "No matching category found. try !listcategories {}",
+                    game.name
+                ),
+                None,
             );
         }
     };
@@ -375,16 +408,38 @@ async fn _add_race(mut args: Arguments<'_>, pool: &SqlitePool) -> String {
     match create_race(&game, &cat, occurs, pool).await {
         Some(r) => r,
         None => {
-            return "Unknown error creating the race. Bug Fox about it.".to_owned();
+            return (
+                "Unknown error creating the race. Bug Fox about it.".to_owned(),
+                None,
+            );
         }
     };
 
-    format!(
-        "A new race has been created: {} - {} at {}",
+    let racer_react = {
+        let lock = bot_state.emojis.read().await;
+        match lock.get("raisinghand") {
+            None => {
+                warn!("Can't find raising hand emoji");
+                ":thumbup:".to_owned()
+            }
+            Some(eid) => {
+                format!("<:raisinghand:{}>", eid)
+            }
+        }
+    };
+
+    let schedule_content = format!(
+        "There will be a race of {} - {} on {}.\
+If you are racing, react with {}
+If you are available to commentate, react with :microphone2:
+If you are able to restream, react with :tv:",
         game.name_pretty,
         cat.name_pretty,
-        occurs.format("%A, %B %d at %I:%M%p")
-    )
+        occurs.format("%A, %B %d at %I:%M%p %Z"),
+        racer_react
+    );
+
+    ("Race created!".to_string(), Some(schedule_content))
 }
 
 async fn create_race(
@@ -572,20 +627,48 @@ async fn get_categories(game: &Game, pool: &SqlitePool) -> Vec<Category> {
     categories
 }
 
+async fn setup_emojis(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
+    let mut lock = bot_state.emojis.write().await;
+    for e in &guild.emojis {
+        lock.insert(e.name.to_string(), e.id);
+    }
+}
+
 async fn setup_channels(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
+    let mut has_schedule_channel = false;
     let mut lock = bot_state.channels.write().await;
     for c in &guild.channels {
-        debug!("Inserting channel `{}`", c.name());
+        debug!("Inserting channel `{}` {}", c.name(), c.id());
         lock.insert(c.name().to_string(), c.id());
+        if c.name() == SCHEDULING_CHANNEL_NAME {
+            has_schedule_channel = true;
+        }
+    }
+    if !has_schedule_channel {
+        match bot_state
+            .http
+            .create_guild_channel(guild.id.clone(), SCHEDULING_CHANNEL_NAME)
+        {
+            Ok(chan) => match chan
+                .kind(ChannelType::GuildText)
+                .parent_id(798390141496197212)
+                .await
+            {
+                Ok(created) => {
+                    lock.insert(created.name().to_string(), created.id());
+                }
+                Err(e) => {
+                    warn!("Error creating scheduling channel: {}", e);
+                }
+            },
+            Err(e) => {
+                warn!("Error creating scheduling channel: {}", e);
+            }
+        }
     }
 }
 
 async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
-    // for role in &guild.roles {
-    // println!("role: {:?}", role);
-    // }
-    // let role_perms = Permissions::
-    // let role_perms = PERM
     let desired_roles = vec![DesiredRoleBuilder::default()
         .name("active-racer".to_string())
         .color(0xE74C3C)
