@@ -15,7 +15,6 @@ use twilight_model::gateway::Intents;
 use twilight_model::guild::{Permissions, Role};
 use twilight_model::id::{ChannelId, EmojiId, RoleId, UserId};
 
-use super::constants::DISCORD_TOKEN;
 use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
 use twilight_http::request::guild::role::CreateRole;
 
@@ -104,7 +103,9 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
     // This is the default scheme. It will automatically create as many
     // shards as is suggested by Discord.
     let intents = Intents::GUILD_MESSAGES | Intents::GUILDS | Intents::GUILD_MESSAGE_REACTIONS;
-    let cluster = Cluster::builder(DISCORD_TOKEN, intents)
+
+    let discord_token = dotenv::var("DISCORD_TOKEN").unwrap();
+    let cluster = Cluster::builder(discord_token.clone(), intents)
         .shard_scheme(ShardScheme::Auto)
         .build()
         .await?;
@@ -115,7 +116,7 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         cluster_spawn.up().await;
     });
 
-    let http_client = HttpClient::new(DISCORD_TOKEN);
+    let http_client = HttpClient::new(discord_token);
 
     let cache = InMemoryCache::builder()
         .resource_types(
@@ -150,7 +151,7 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         channels: Default::default(),
         emojis: Default::default(),
     });
-    let sqlite_db_path = var("SQLITE_DB_PATH").unwrap();
+    let sqlite_db_path = dotenv::var("SQLITE_DB_PATH").unwrap();
     // use a SqliteConnectOptions instead of a hardcoded queryparam?
     let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
     let pool: SqlitePool = SqlitePoolOptions::new()
@@ -174,8 +175,10 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
     }
 }
 
-async fn handle_events(bot_state: Arc<BotState>, pool: SqlitePool) -> Result<(), Box<dyn Error + Send + Sync>> {
-
+async fn handle_events(
+    bot_state: Arc<BotState>,
+    pool: SqlitePool,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let games = get_games(&pool).await;
     for g in games {
         println!("Game: {:?}", g);

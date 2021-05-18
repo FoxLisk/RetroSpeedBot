@@ -23,7 +23,9 @@ derive_builder = "0.10.2"
 sqlx = { version = "0.5", features = [ "runtime-tokio-rustls" , "sqlite", "chrono"] }
 chrono = "0.4"
 chrono-tz = "0.5"
+dotenv = "0.15.0"
 
 [build-dependencies]
 sqlx = { version = "0.5", features = ["runtime-tokio-rustls" , "sqlite",] }
 tokio = { version = "1.0", features = ["macros", ] }
+dotenv = "0.15.0"
