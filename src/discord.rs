@@ -201,6 +201,26 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
         interval.tick().await;
 
         let races = get_upcoming_races(Duration::from_secs(60 * 30), &pool).await;
+        /*
+        for race in races:
+            check reacts on the scheduling message
+            set interested-* roles
+            @message ppl (where? do we want a dedicated channel for this?)
+            set race to ACTIVE
+
+        let active = get_active_races()
+        for race in active:
+            check reacts on the @message from before
+            swap ready-* roles out for active-* roles
+            if (some condition such as (mins until race % 5 == 0)) {
+                @message interested-* ppl who haven't confirmed yet
+            }
+            if the start time has passed, shut up
+                or perhaps keep pinging until a mod says !startrace or something?
+            if start time passed, like, 2 hours ago or something, remove the racer roles
+                one problem here is tracking racers, potentially, if we've restarted since setting stuff in memory
+
+         */
         debug!("tick... tock...");
     }
 }
@@ -277,6 +297,28 @@ async fn handle_event(
             debug!("Discord: Shard connected!");
         }
         Event::GatewayHeartbeatAck => {}
+
+        // Check if these are on races that are *active* - if so, add/remove roles
+        Event::ReactionAdd(ra) => {
+            /*
+            if ra.emoji is one of the ones we care about:
+                let msg_id = get_msg(ra.message_id);
+                // this is a bit confusing because we're going to get the same *race* object in either case,
+                // the difference is just if we got it via scheduling msg or via ready-up msg.
+                if let Some(upcoming_race) = get_race_by_scheduling_msg_id(msg_id):
+                    // this is a scheduling message, players are interested
+                    add interested-* role to player if they don't have it or active-* role
+                else if let Some(active_race) = get_race_by_active_msg_id(msg_id):
+                    // this is an active message, players are readying up
+                    remove interested-* role from player
+                    add active-* role if they don't have it
+
+                the ReactionRemove code should be very similar to this, with the addition that if
+                someone removes their ready emoji it's unclear if they should be moved back to interested-
+                or if they should be removed entirely.
+             */
+        }
+        Event::ReactionRemove(rr) => {}
         _ => {}
     }
 
@@ -667,6 +709,8 @@ struct Race {
     // message_id is a u64, which sqlx does not want to stick in Sqlite.
     /// Use get/set_message_id() functions
     message_id: Option<String>,
+
+    // TODO: add active_message_id, rename above to scheduling_message_id
 }
 
 impl Race {
@@ -1001,7 +1045,8 @@ mod test {
         race.set_state(RaceState::ACTIVE);
         update_race(&race, &pool).await.unwrap();
 
-        // TODO: get_race()
+        // it would be reasonable to add a get_race_by_id() kind of message, but I don't think it's
+        // actually useful yet.
         let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE id = ?", race.id);
         let race_refreshed = q.fetch_one(&pool).await.unwrap();
         assert_eq!(race, race_refreshed);

@@ -20,7 +20,8 @@ For debugging. `RUST_LOG` is for the `env_logger` library.
 
 `build.rs` is a build script that is called at the beginning of compilation. This is required to set up database state.
 See [sqlx migration documentation](https://docs.rs/sqlx/0.5.2/sqlx/migrate/struct.Migrator.html) or the [more-useful examples](
-https://github.com/launchbadge/sqlx/tree/master/examples/sqlite/todos).
+https://github.com/launchbadge/sqlx/tree/master/examples/sqlite/todos). It is current practice to wipe and rebuild the db
+whenever I feel like it in testing.
 
 `main.rs` is a very thin hub. It should do as little as possible to set tokio threads working.
 
@@ -51,21 +52,16 @@ and sends them back to discord. the point here being to separate out the DB acce
 ## critical path TODOs:
 
  * actually do stuff when race time is getting closer
-   * probably have some every-minute or every-5-minutes thing that checks if there's a race
-     coming up, and if so finds it in the scheduling channel and does stuff with the reacts
+   * extensive comments about this in code now
  * get it running on linux (hopefully (*gulp*) this is easy)
  * races should have a notes field - stuff like "for new runners".
  * a command to delete a race
-  
 
 ## misc TODOs - not any special order:
 
  * Rate limit the bot
- * add a !commands command, or similar
+ * add a `!commands` command, or similar
  * pre-populate race reactions
- * i kinda think sending newly created races, possibly fully hydrated, off to some like mpsc-based
-   handler might be the way of the hero?
-   * update - thinking maybe no
  * ORM stuff is looking more and more desireable
    * OMFG look into this!!! https://docs.rs/ormx/0.7.0/ormx/
    * the documentation is - of course! - a total joke, but maybe very useful.
