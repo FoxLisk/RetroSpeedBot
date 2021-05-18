@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS race
     game_id     INTEGER NOT NULL,
     category_id INTEGER NOT NULL,
     occurs      INTEGER NOT NULL,
-    message_id  INTEGER NULL,
+    state       TEXT NOT NULL,
+    message_id  TEXT NULL,
 
     FOREIGN KEY(game_id) REFERENCES game(id),
     FOREIGN KEY(category_id) REFERENCES category(id),

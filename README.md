@@ -35,13 +35,22 @@ haven't bothered yet. The main things are:
 1. The models - these should have their own module, but they're currently `Game`, `Category`, and `Race`. These have
    some CRUD methods. The CRUD methods should honestly be macro-generated - but I want to get something working before
    I indulge my habit of toying around with language features _too_ much.
+   
+Most incoming user requests go through `handle_events()`, get dispatched to an interim function that handles parsing and
+discord stuff but calls an "ORM" function to do database interactions.
+   
+# Running tests:
+
+* Set `DATABASE_URL` to something other than `real_db.db3` in your environment
+  * Can we make this handled programmatically? it's used at build time so it's a little funny.
+* Run `cargo test`.
+* making a reasonable test harness is TODO; it's currently a mess down there.
+
 
 # TODOs:
 
 ## critical path TODOs:
 
- * some sort of way to sync the messages w/ the races
-   * perhaps the race table should have a channel/message id of the associated message?
  * actually do stuff when race time is getting closer
    * probably have some every-minute or every-5-minutes thing that checks if there's a race
      coming up, and if so finds it in the scheduling channel and does stuff with the reacts
@@ -57,11 +66,14 @@ haven't bothered yet. The main things are:
  * pre-populate race reactions
  * i kinda think sending newly created races, possibly fully hydrated, off to some like mpsc-based
    handler might be the way of the hero?
+   * update - thinking maybe no
  * ORM stuff is looking more and more desireable
+   * OMFG look into this!!! https://docs.rs/ormx/0.7.0/ormx/
+   * the documentation is - of course! - a total joke, but maybe very useful.
  * keeping some stuff in memory would probably be cool, although N ~= 1 for a long time so it shouldn't matter. Things
    like races should be cheap enough to store in memory and then mega fast to iterate over, if we wanted.
- * scheduled races would be cool
  * bot commands to manipulate games/categories instead of "tell a dev and get it added to the build script"
  * 80 trillion unit tests, ideally
  * this list itself should be in github maybe
-
+ * racetime.gg integration would be cool
+ * scheduled races would be cool

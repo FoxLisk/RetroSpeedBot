@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::env::var;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -13,7 +12,7 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Permissions, Role};
-use twilight_model::id::{ChannelId, EmojiId, RoleId, UserId, MessageId};
+use twilight_model::id::{ChannelId, EmojiId, MessageId, RoleId, UserId};
 
 use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
 use twilight_http::request::guild::role::CreateRole;
@@ -23,11 +22,11 @@ use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{SqlitePool, Encode, Sqlite};
+use sqlx::SqlitePool;
+use std::fmt::{Display, Formatter};
 use std::iter::FromIterator;
-use twilight_model::channel::{ChannelType, Message};
-use sqlx::database::HasArguments;
-use sqlx::encode::IsNull;
+use std::str::FromStr;
+use twilight_model::channel::ChannelType;
 
 struct BotState {
     http: Client,
@@ -153,23 +152,49 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         channels: Default::default(),
         emojis: Default::default(),
     });
-    let sqlite_db_path = dotenv::var("SQLITE_DB_PATH").unwrap();
-    // use a SqliteConnectOptions instead of a hardcoded queryparam?
-    let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
-    let pool: SqlitePool = SqlitePoolOptions::new()
-        .max_connections(12)
-        .connect(&path_with_params)
-        .await
-        .unwrap();
+
+    let pool = get_pool().await.unwrap();
 
     let jh = tokio::spawn(handle_events(bot_state.clone(), pool.clone()));
     let cjh = tokio::spawn(cron(bot_state.clone(), pool.clone()));
 
     jh.await.unwrap().unwrap();
+    cjh.await.unwrap();
     Ok(())
 }
 
+async fn get_pool() -> Result<SqlitePool, sqlx::Error> {
+    let sqlite_db_path = dotenv::var("DATABASE_URL").unwrap();
+    // use a SqliteConnectOptions instead of a hardcoded queryparam?
+    let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
+    SqlitePoolOptions::new()
+        .max_connections(12)
+        .connect(&path_with_params)
+        .await
+}
+
 async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
+    /*
+    do we need something like a users table and <users, racers>/<users, commentators>/<users, restreamers> join tables?
+    I'd rather avoid that - it's a lot of extra work, at least without ORM autogeneration magic. I think we can handle it
+    all reactively... :\
+
+    Basic design of this subsystem:
+    * Every $DURATION we wake up and check state against db.
+    * if there is a race in the next $SOON, do some stuff about it:
+      1. if this is the first time this race has been $SOON:
+        1. set race to ACTIVE
+        1. set roles
+            * i think we want, like, "active-X-interested" and "active-X-confirmed" roles for racer/restreamer/commentator
+            * somewhere else we need to be responding to reacts by adding the roles *if* the race is $SOON
+            * that almost definitely implies we want an in-memory cache of the race, unfortunately. that's kind of annoying.
+        1. send messages
+            * send a message that has a @active-X-interested roles in it telling people to react if they're ready
+            * we can react to this elsewhere or perhaps, if it's easier, we can simply check each time we wake up
+      1. otherwise:
+        1. if we've waited $LONG_ENOUGH, bug people again
+      1. unsetting this stuff is probably going to require an !endrace from a mod for now. might hook into racetime in the future
+     */
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 1));
     loop {
         interval.tick().await;
@@ -349,24 +374,23 @@ async fn add_race(
             }
         };
         if let Some(cid) = schedule_channel_id {
-           match bot_state
+            match bot_state
                 .http
                 .create_message(cid)
                 .content(schedule_message)
                 .unwrap()
-                .await {
-               Ok(ok) => {
-                   if let Some(mut r) = race {
-                       r.set_message_id(ok.id);
-                       update_race(&r, pool).await;
-                   }
-               }
-               Err(_) => {}
-           }
+                .await
+            {
+                Ok(ok) => {
+                    if let Some(mut r) = race {
+                        r.set_message_id(ok.id);
+                        update_race(&r, pool).await;
+                    }
+                }
+                Err(_) => {}
+            }
         }
-
     }
-    // let scheuld_message = format!("There is a race for {} at {}. "
 }
 
 // TODO this is kind of a shitty return value at this point lol
@@ -409,7 +433,8 @@ async fn _add_race(
         None => {
             return (
                 "No game found with that name. Try !listgames".to_owned(),
-                None, None
+                None,
+                None,
             );
         }
     };
@@ -422,7 +447,8 @@ async fn _add_race(
                     "No matching category found. try !listcategories {}",
                     game.name
                 ),
-                None,None
+                None,
+                None,
             );
         }
     };
@@ -432,7 +458,8 @@ async fn _add_race(
         None => {
             return (
                 "Unknown error creating the race. Bug Fox about it.".to_owned(),
-                None, None,
+                None,
+                None,
             );
         }
     };
@@ -466,9 +493,7 @@ If you are able to restream, react with :tv:
     ("Race created!".to_string(), Some(schedule_content), r)
 }
 
-
-// TODO: do we ever want to create a race with a message_id? seems like that's always gonna be an
-//       update.
+// TODO: This creates a race with null message_id and state SCHEDULED, always. Is that bad?
 async fn create_race(
     game: &Game,
     category: &Category,
@@ -476,7 +501,8 @@ async fn create_race(
     pool: &SqlitePool,
 ) -> Option<Race> {
     let ts = occurs.timestamp();
-    let q = sqlx::query!("INSERT INTO race (game_id, category_id, occurs) VALUES (?, ?, ?); SELECT last_insert_rowid() as rowid;", game.id, category.id, ts);
+    let state = RaceState::SCHEDULED.to_string();
+    let q = sqlx::query!("INSERT INTO race (game_id, category_id, occurs, state) VALUES (?, ?, ?, ?); SELECT last_insert_rowid() as rowid;", game.id, category.id, ts, state);
     match q.fetch_one(pool).await {
         Ok(e) => {
             debug!("create_race got me a {:?}", e);
@@ -484,8 +510,9 @@ async fn create_race(
                 id: e.rowid as i64,
                 game_id: game.id,
                 category_id: category.id,
-                occurs,
+                occurs: ts,
                 message_id: None,
+                state,
             })
         }
         Err(e) => {
@@ -495,12 +522,17 @@ async fn create_race(
     }
 }
 
-async fn update_race(
-    race: &Race,
-    pool: &SqlitePool
-) -> sqlx::Result<()> {
-    let ts = race.occurs.timestamp();
-    let q = sqlx::query!("UPDATE race SET game_id = ?, category_id = ?, occurs = ?, message_id = ? WHERE id = ?", race.game_id, race.category_id, ts, race.message_id, race.id);
+async fn update_race(race: &Race, pool: &SqlitePool) -> sqlx::Result<()> {
+    let q = sqlx::query!(
+        "UPDATE race SET game_id = ?, category_id = ?, occurs = ?, message_id = ?, state = ? WHERE id = ?",
+        race.game_id,
+        race.category_id,
+        race.occurs,
+        race.message_id,
+        race.state,
+        race.id,
+    );
+    debug!("Updating race: {:?}", race);
     match q.execute(pool).await {
         Ok(_) => Ok(()),
         Err(e) => Err(e),
@@ -554,7 +586,7 @@ async fn list_games(msg: &Box<MessageCreate>, bot_state: Arc<BotState>, pool: &S
 // Would love to have a real ORM... oh well
 // it's probably actually better to have id: Option<i64> so we can create models that aren't
 // DB-backed
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Game {
     id: i64,
     name: String,
@@ -563,6 +595,8 @@ struct Game {
 
 // TODO: hmmm... how to handle FKs? i think *for now* it's fine to just do stuff top down.
 //       probably eventually we want some kind of hydration
+
+#[derive(Debug, PartialEq)]
 struct Category {
     id: i64,
     game_id: i64,
@@ -570,31 +604,78 @@ struct Category {
     name_pretty: String,
 }
 
+#[derive(Debug, PartialEq)]
+enum RaceState {
+    SCHEDULED,
+    ACTIVE,
+    COMPLETED,
+}
+
+impl Display for RaceState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                RaceState::SCHEDULED => "SCHEDULED",
+                RaceState::ACTIVE => "ACTIVE",
+                RaceState::COMPLETED => "COMPLETED",
+            }
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ParseError;
+impl Display for ParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Parse error")
+    }
+}
+impl Error for ParseError {}
+
+impl FromStr for RaceState {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "SCHEDULED" => Ok(RaceState::SCHEDULED),
+            "ACTIVE" => Ok(RaceState::ACTIVE),
+            "COMPLETED" => Ok(RaceState::COMPLETED),
+            _ => Err(ParseError),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 struct Race {
     id: i64,
+    // N.B. game_id is not strictly necessary in this struct
     game_id: i64,
     category_id: i64,
+
+    /// use get/set_state() functions
+    state: String,
+
     // Serialized as seconds-since-epoch
-    occurs: DateTime<Tz>,
+    occurs: i64,
 
     // message_id is a u64, which sqlx does not want to stick in Sqlite.
-    /// Use get/set_message_id() function instead of this
+    /// Use get/set_message_id() functions
     message_id: Option<String>,
 }
 
 impl Race {
     fn get_message_id(&self) -> Option<MessageId> {
         match &self.message_id {
-            Some(s) => {
-                match s.parse::<u64>() {
-                    Ok(id) => Some(MessageId(id)),
-                    Err(e) => {
-                        warn!("Error parsing message id {}: {}", s, e);
-                        None
-                    }
+            Some(s) => match s.parse::<u64>() {
+                Ok(id) => Some(MessageId(id)),
+                Err(e) => {
+                    warn!("Error parsing message id {}: {}", s, e);
+                    None
                 }
             },
-            None => None
+            None => None,
         }
     }
 
@@ -602,9 +683,23 @@ impl Race {
     fn set_message_id(&mut self, id: MessageId) {
         self.message_id = Some(id.to_string());
     }
+
+    fn get_occurs(&self) -> DateTime<Tz> {
+        unimplemented!()
+    }
+
+    fn set_occurs(&mut self, occurs: DateTime<Tz>) {
+        self.occurs = occurs.timestamp();
+    }
+
+    fn get_state(&self) -> RaceState {
+        RaceState::from_str(&self.state).unwrap()
+    }
+
+    fn set_state(&mut self, state: RaceState) {
+        self.state = state.to_string();
+    }
 }
-
-
 
 async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
     let q = sqlx::query_as!(
@@ -794,21 +889,42 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
 
 #[cfg(test)]
 mod test {
-    use crate::discord::parse_time;
+    use crate::discord::{
+        create_race, get_category, get_game, get_pool, parse_time, update_race, Race, RaceState,
+    };
     use chrono::{Datelike, NaiveDateTime, Timelike};
+    use sqlx::SqlitePool;
+    use twilight_model::id::MessageId;
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
+    async fn initdb(pool: &SqlitePool) {
+        let queries = vec![
+            "DELETE FROM race",
+            "DELETE FROM category",
+            "DELETE FROM game",
+            "INSERT INTO game (id, name, name_pretty) VALUES (1, 'alttp', 'A Link To The Past')",
+            "INSERT INTO category (game_id, name, name_pretty) VALUES (1, 'ms', 'Master Sword')",
+            "INSERT INTO category (game_id, name, name_pretty) VALUES (1, 'nmg', 'Any% NMG No S&Q')"
+            ];
+        for sql in queries {
+            let q = sqlx::query(sql);
+            q.execute(pool).await;
+        }
+    }
+
     #[test]
     fn test_datetime_stuff() {
+        init();
         let ndt = NaiveDateTime::parse_from_str("06/09/2021 11:00pm", "%m/%d/%Y %I:%M%P");
         ndt.unwrap();
     }
 
     #[test]
     fn test_parse_time() {
+        init();
         let odt = parse_time("06/09/2021 11:00pm");
         assert!(odt.is_some());
         let dt = odt.unwrap();
@@ -820,5 +936,35 @@ mod test {
         assert_eq!(0, dt.second());
         assert_eq!("2021-06-09T23:00:00-04:00", dt.to_rfc3339());
         assert_eq!(1623294000, dt.timestamp());
+    }
+
+    // N.B. any test that hits the database needs this annotation. the flavor="multi_thread" part is
+    // required to allow get_pool() to resolve, which eventually bottoms out doing something
+    // blocking, apparently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_race_operations() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+        let when = parse_time("06/09/2021 11:10pm").unwrap();
+        let r = create_race(&g, &c, when, &pool).await;
+        assert!(r.is_some());
+        let mut race = r.unwrap();
+        assert_eq!(race.occurs, when.timestamp());
+        assert_eq!(race.category_id, c.id);
+        assert_eq!(race.game_id, g.id);
+        assert_eq!(race.message_id, None);
+        assert_eq!(race.get_state(), RaceState::SCHEDULED);
+        let mid = MessageId(u64::MAX);
+        race.set_message_id(mid);
+        race.set_state(RaceState::ACTIVE);
+        update_race(&race, &pool).await.unwrap();
+
+        // TODO: get_race()
+        let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE id = ?", race.id);
+        let race_refreshed = q.fetch_one(&pool).await.unwrap();
+        assert_eq!(race, race_refreshed);
     }
 }
