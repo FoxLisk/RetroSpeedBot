@@ -13,7 +13,7 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Permissions, Role};
-use twilight_model::id::{ChannelId, EmojiId, RoleId, UserId};
+use twilight_model::id::{ChannelId, EmojiId, RoleId, UserId, MessageId};
 
 use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
 use twilight_http::request::guild::role::CreateRole;
@@ -23,9 +23,11 @@ use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, Encode, Sqlite};
 use std::iter::FromIterator;
-use twilight_model::channel::ChannelType;
+use twilight_model::channel::{ChannelType, Message};
+use sqlx::database::HasArguments;
+use sqlx::encode::IsNull;
 
 struct BotState {
     http: Client,
@@ -327,7 +329,7 @@ async fn add_race(
         return;
     }
 
-    let (reply, schedule) = _add_race(args, bot_state.clone(), pool).await;
+    let (reply, schedule, race) = _add_race(args, bot_state.clone(), pool).await;
     bot_state
         .http
         .create_message(msg.channel_id)
@@ -347,48 +349,58 @@ async fn add_race(
             }
         };
         if let Some(cid) = schedule_channel_id {
-            bot_state
+           match bot_state
                 .http
                 .create_message(cid)
                 .content(schedule_message)
                 .unwrap()
-                .await;
+                .await {
+               Ok(ok) => {
+                   if let Some(mut r) = race {
+                       r.set_message_id(ok.id);
+                       update_race(&r, pool).await;
+                   }
+               }
+               Err(_) => {}
+           }
         }
+
     }
     // let scheuld_message = format!("There is a race for {} at {}. "
 }
 
+// TODO this is kind of a shitty return value at this point lol
 async fn _add_race(
     mut args: Arguments<'_>,
     bot_state: Arc<BotState>,
     pool: &SqlitePool,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Option<Race>) {
     let syntax_error = "Please use the following format: !newrace <game alias> <category alias> <time>. For example: `!newrace alttp ms 6/9/2021 11:00pm. *Convert to Eastern time first*";
     let game_name = match args.next() {
         Some(game) => game,
         None => {
-            return (syntax_error.to_owned(), None);
+            return (syntax_error.to_owned(), None, None);
         }
     };
 
     let cat_name = match args.next() {
         Some(cat) => cat,
         None => {
-            return (syntax_error.to_owned(), None);
+            return (syntax_error.to_owned(), None, None);
         }
     };
 
     let time = match args.into_remainder() {
         Some(t) => t,
         None => {
-            return (syntax_error.to_owned(), None);
+            return (syntax_error.to_owned(), None, None);
         }
     };
 
     let occurs = match parse_time(time) {
         Some(dt) => dt,
         None => {
-            return (syntax_error.to_owned(), None);
+            return (syntax_error.to_owned(), None, None);
         }
     };
 
@@ -397,7 +409,7 @@ async fn _add_race(
         None => {
             return (
                 "No game found with that name. Try !listgames".to_owned(),
-                None,
+                None, None
             );
         }
     };
@@ -410,17 +422,17 @@ async fn _add_race(
                     "No matching category found. try !listcategories {}",
                     game.name
                 ),
-                None,
+                None,None
             );
         }
     };
 
-    match create_race(&game, &cat, occurs, pool).await {
-        Some(r) => r,
+    let r = match create_race(&game, &cat, occurs, pool).await {
+        Some(r) => Some(r),
         None => {
             return (
                 "Unknown error creating the race. Bug Fox about it.".to_owned(),
-                None,
+                None, None,
             );
         }
     };
@@ -440,18 +452,23 @@ async fn _add_race(
 
     let schedule_content = format!(
         "There will be a race of {} - {} on {}.
+
 If you are racing, react with {}
 If you are available to commentate, react with :microphone2:
-If you are able to restream, react with :tv:",
+If you are able to restream, react with :tv:
+",
         game.name_pretty,
         cat.name_pretty,
         occurs.format("%A, %B %d at %I:%M%p %Z"),
         racer_react
     );
 
-    ("Race created!".to_string(), Some(schedule_content))
+    ("Race created!".to_string(), Some(schedule_content), r)
 }
 
+
+// TODO: do we ever want to create a race with a message_id? seems like that's always gonna be an
+//       update.
 async fn create_race(
     game: &Game,
     category: &Category,
@@ -468,12 +485,25 @@ async fn create_race(
                 game_id: game.id,
                 category_id: category.id,
                 occurs,
+                message_id: None,
             })
         }
         Err(e) => {
             error!("error creating race: {:?}", e);
             None
         }
+    }
+}
+
+async fn update_race(
+    race: &Race,
+    pool: &SqlitePool
+) -> sqlx::Result<()> {
+    let ts = race.occurs.timestamp();
+    let q = sqlx::query!("UPDATE race SET game_id = ?, category_id = ?, occurs = ?, message_id = ? WHERE id = ?", race.game_id, race.category_id, ts, race.message_id, race.id);
+    match q.execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -544,8 +574,37 @@ struct Race {
     id: i64,
     game_id: i64,
     category_id: i64,
+    // Serialized as seconds-since-epoch
     occurs: DateTime<Tz>,
+
+    // message_id is a u64, which sqlx does not want to stick in Sqlite.
+    /// Use get/set_message_id() function instead of this
+    message_id: Option<String>,
 }
+
+impl Race {
+    fn get_message_id(&self) -> Option<MessageId> {
+        match &self.message_id {
+            Some(s) => {
+                match s.parse::<u64>() {
+                    Ok(id) => Some(MessageId(id)),
+                    Err(e) => {
+                        warn!("Error parsing message id {}: {}", s, e);
+                        None
+                    }
+                }
+            },
+            None => None
+        }
+    }
+
+    // TODO: figure out how to make this accept a string too?
+    fn set_message_id(&mut self, id: MessageId) {
+        self.message_id = Some(id.to_string());
+    }
+}
+
+
 
 async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
     let q = sqlx::query_as!(
