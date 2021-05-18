@@ -36,16 +36,15 @@ haven't bothered yet. The main things are:
    some CRUD methods. The CRUD methods should honestly be macro-generated - but I want to get something working before
    I indulge my habit of toying around with language features _too_ much.
    
-Most incoming user requests go through `handle_events()`, get dispatched to an interim function that handles parsing and
-discord stuff but calls an "ORM" function to do database interactions.
+Most incoming user requests go through `handle_events()`, get dispatched to an interim function such as
+`list_categories`, which handles command parsing, then grabs the data via `get_categories`, and then formats them
+and sends them back to discord. the point here being to separate out the DB access from the rest.
    
 # Running tests:
 
 * Set `DATABASE_URL` to something other than `real_db.db3` in your environment
-  * Can we make this handled programmatically? it's used at build time so it's a little funny.
 * Run `cargo test`.
 * making a reasonable test harness is TODO; it's currently a mess down there.
-
 
 # TODOs:
 

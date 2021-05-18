@@ -17,7 +17,7 @@ use twilight_model::id::{ChannelId, EmojiId, MessageId, RoleId, UserId};
 use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
 use twilight_http::request::guild::role::CreateRole;
 
-use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration as CDuration, Local, LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
@@ -26,6 +26,7 @@ use sqlx::SqlitePool;
 use std::fmt::{Display, Formatter};
 use std::iter::FromIterator;
 use std::str::FromStr;
+use tokio::time::Duration;
 use twilight_model::channel::ChannelType;
 
 struct BotState {
@@ -198,6 +199,8 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 1));
     loop {
         interval.tick().await;
+
+        let races = get_upcoming_races(Duration::from_secs(60 * 30), &pool).await;
         debug!("tick... tock...");
     }
 }
@@ -427,6 +430,7 @@ async fn _add_race(
             return (syntax_error.to_owned(), None, None);
         }
     };
+    // TODO: don't create races in the past
 
     let game = match get_game(game_name, pool).await {
         Some(g) => g,
@@ -791,6 +795,38 @@ async fn get_categories(game: &Game, pool: &SqlitePool) -> Vec<Category> {
     categories
 }
 
+async fn get_upcoming_races(window: Duration, pool: &SqlitePool) -> Vec<Race> {
+    let now = Local::now().timestamp();
+    let until = (Local::now() + CDuration::from_std(window).unwrap()).timestamp();
+    let state = RaceState::SCHEDULED.to_string();
+    let q = sqlx::query_as!(
+        Race,
+        "SELECT * FROM race WHERE state = ? and occurs > ? and occurs < ?",
+        state,
+        now,
+        until
+    );
+    let mut rows = q.fetch(pool);
+    let mut races = vec![];
+    while let r = rows.try_next().await {
+        match r {
+            Ok(mc) => match mc {
+                Some(c) => {
+                    races.push(c);
+                }
+                None => {
+                    break;
+                }
+            },
+            Err(e) => {
+                warn!("Error fetching row: {:?}", e);
+            }
+        }
+    }
+
+    races
+}
+
 async fn setup_emojis(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
     let mut lock = bot_state.emojis.write().await;
     for e in &guild.emojis {
@@ -890,10 +926,13 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
 #[cfg(test)]
 mod test {
     use crate::discord::{
-        create_race, get_category, get_game, get_pool, parse_time, update_race, Race, RaceState,
+        create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time, update_race,
+        Race, RaceState,
     };
-    use chrono::{Datelike, NaiveDateTime, Timelike};
+    use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike, Utc};
+    use chrono_tz::US::Eastern;
     use sqlx::SqlitePool;
+    use tokio::time::Duration;
     use twilight_model::id::MessageId;
 
     fn init() {
@@ -966,5 +1005,27 @@ mod test {
         let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE id = ?", race.id);
         let race_refreshed = q.fetch_one(&pool).await.unwrap();
         assert_eq!(race, race_refreshed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_races() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+
+        let when = Local::now();
+        let later =
+            (when + CDuration::from_std(Duration::from_secs(60)).unwrap()).with_timezone(&Eastern);
+
+        // let when = Eastern::now() + CDuration::from_std(Duration::from_secs(60)).unwrap();
+        let r = create_race(&g, &c, later, &pool).await;
+        assert!(r.is_some());
+        let mut race = r.unwrap();
+
+        let scheduled = get_upcoming_races(Duration::from_secs(120), &pool).await;
+        assert_eq!(1, scheduled.len());
     }
 }
