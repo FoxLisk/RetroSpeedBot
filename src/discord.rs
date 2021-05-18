@@ -929,7 +929,7 @@ mod test {
         create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time, update_race,
         Race, RaceState,
     };
-    use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike, Utc};
+    use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike};
     use chrono_tz::US::Eastern;
     use sqlx::SqlitePool;
     use tokio::time::Duration;
@@ -1023,7 +1023,6 @@ mod test {
         // let when = Eastern::now() + CDuration::from_std(Duration::from_secs(60)).unwrap();
         let r = create_race(&g, &c, later, &pool).await;
         assert!(r.is_some());
-        let mut race = r.unwrap();
 
         let scheduled = get_upcoming_races(Duration::from_secs(120), &pool).await;
         assert_eq!(1, scheduled.len());
