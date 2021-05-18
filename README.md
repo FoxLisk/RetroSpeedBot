@@ -2,7 +2,8 @@
 
 This is an IntelliJ Idea project. You don't necessarily need to use that but it'll make your life easier.
 
-You'll need access to the App Token, and then to set it in `.env`. You can get this by asking me (FoxLisk) and getting
+You'll need access to the App Token, and then to set it in your environment as `DISCORD_TOKEN="<the token>"`.
+You can get this by asking me (FoxLisk) and getting
 added to the discord developer team. I suppose you could also use this code to run a different bot with a different
 token, if that were your idea of a good time.
 
@@ -45,6 +46,9 @@ haven't bothered yet. The main things are:
    * probably have some every-minute or every-5-minutes thing that checks if there's a race
      coming up, and if so finds it in the scheduling channel and does stuff with the reacts
  * get it running on linux (hopefully (*gulp*) this is easy)
+ * races should have a notes field - stuff like "for new runners".
+ * a command to delete a race
+  
 
 ## misc TODOs - not any special order:
 
@@ -53,3 +57,11 @@ haven't bothered yet. The main things are:
  * pre-populate race reactions
  * i kinda think sending newly created races, possibly fully hydrated, off to some like mpsc-based
    handler might be the way of the hero?
+ * ORM stuff is looking more and more desireable
+ * keeping some stuff in memory would probably be cool, although N ~= 1 for a long time so it shouldn't matter. Things
+   like races should be cheap enough to store in memory and then mega fast to iterate over, if we wanted.
+ * scheduled races would be cool
+ * bot commands to manipulate games/categories instead of "tell a dev and get it added to the build script"
+ * 80 trillion unit tests, ideally
+ * this list itself should be in github maybe
+
