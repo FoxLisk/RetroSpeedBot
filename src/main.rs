@@ -39,7 +39,7 @@ critical path TODOs:
  * actually do stuff when race time is getting closer
    * probably have some every-minute or every-5-minutes thing that checks if there's a race
      coming up, and if so finds it in the scheduling channel and does stuff with the reacts
-     
+ * get it running on linux (hopefully (*gulp*) this is easy)
 
 misc TODOs - not any special order:
 

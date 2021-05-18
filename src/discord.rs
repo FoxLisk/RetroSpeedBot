@@ -150,25 +150,32 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         channels: Default::default(),
         emojis: Default::default(),
     });
+    let sqlite_db_path = var("SQLITE_DB_PATH").unwrap();
+    // use a SqliteConnectOptions instead of a hardcoded queryparam?
+    let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
+    let pool: SqlitePool = SqlitePoolOptions::new()
+        .max_connections(12)
+        .connect(&path_with_params)
+        .await
+        .unwrap();
 
-    // let (queries_send, queries_recv) = tokio::sync::mpsc::channel(1000);
-
-    let jh = tokio::spawn(handle_events(bot_state.clone()));
-    // let sql_jh = tokio::spawn(sqlite(sqlite_db_path, queries_recv));
+    let jh = tokio::spawn(handle_events(bot_state.clone(), pool.clone()));
+    let cjh = tokio::spawn(cron(bot_state.clone(), pool.clone()));
 
     jh.await.unwrap().unwrap();
     Ok(())
 }
 
-async fn handle_events(bot_state: Arc<BotState>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let sqlite_db_path = var("SQLITE_DB_PATH").unwrap();
-    // use a SqliteConnectOptions instead of a hardcoded queryparam?
-    let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(12)
-        .connect(&path_with_params)
-        .await
-        .unwrap();
+async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 1));
+    loop {
+        interval.tick().await;
+        debug!("tick... tock...");
+    }
+}
+
+async fn handle_events(bot_state: Arc<BotState>, pool: SqlitePool) -> Result<(), Box<dyn Error + Send + Sync>> {
+
     let games = get_games(&pool).await;
     for g in games {
         println!("Game: {:?}", g);
