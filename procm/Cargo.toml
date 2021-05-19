@@ -1,0 +1,17 @@
+[package]
+name = "procm"
+version = "0.1.0"
+authors = ["Alexander <ancorwin@gmail.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+quote = "1"
+proc-macro2 = "1.0"
+syn = "1.0"
+sqlx = { version = "0.5", features = [ "runtime-tokio-rustls" , "sqlite", "chrono"] }
+proc-quote = "0.4.0"

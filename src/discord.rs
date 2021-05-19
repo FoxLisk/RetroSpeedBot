@@ -36,6 +36,8 @@ use twilight_model::channel::message::MessageReaction;
 use twilight_model::channel::{ChannelType, ReactionType};
 use twilight_model::user::User;
 
+use procm::model;
+
 struct BotState {
     http: Client,
     cluster: Cluster,
@@ -313,7 +315,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 .await;
 
             race.set_state(RaceState::ACTIVE);
-            update_race(&race, &pool).await;
+            race.save(&pool).await;
         }
 
         /*
@@ -595,7 +597,7 @@ async fn add_race(
                 Ok(ok) => {
                     if let Some(mut r) = race {
                         r.set_message_id(ok.id);
-                        update_race(&r, pool).await;
+                        r.save(pool).await;
                     }
                 }
                 Err(_) => {}
@@ -692,7 +694,7 @@ async fn _add_race(
     let schedule_content = format!(
         "There will be a race of {} - {} on {}.
 
-If you are racing, react with {}
+If you are interested in racing, react with {}
 If you are available to commentate, react with :microphone2:
 If you are able to restream, react with :tv:
 ",
@@ -734,22 +736,6 @@ async fn create_race(
     }
 }
 
-async fn update_race(race: &Race, pool: &SqlitePool) -> sqlx::Result<()> {
-    let q = sqlx::query!(
-        "UPDATE race SET game_id = ?, category_id = ?, occurs = ?, message_id = ?, state = ? WHERE id = ?",
-        race.game_id,
-        race.category_id,
-        race.occurs,
-        race.message_id,
-        race.state,
-        race.id,
-    );
-    debug!("Updating race: {:?}", race);
-    match q.execute(pool).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
 
 fn parse_time(time_str: &str) -> Option<DateTime<Tz>> {
     let normalized = time_str.to_ascii_lowercase();
@@ -859,23 +845,25 @@ impl FromStr for RaceState {
     }
 }
 
-#[derive(Debug, PartialEq)]
-struct Race {
-    id: i64,
-    // N.B. game_id is not strictly necessary in this struct
-    game_id: i64,
-    category_id: i64,
+model! {
+    #[derive(Debug, PartialEq)]
+    struct Race {
+        id: i64,
+        // N.B. game_id is not strictly necessary in this struct
+        game_id: i64,
+        category_id: i64,
 
-    /// use get/set_state() functions
-    state: String,
+        /// use get/set_state() functions
+        state: String,
 
-    // Serialized as seconds-since-epoch
-    occurs: i64,
+        // Serialized as seconds-since-epoch
+        occurs: i64,
 
-    // message_id is a u64, which sqlx does not want to stick in Sqlite.
-    /// Use get/set_message_id() functions
-    message_id: Option<String>,
-    // TODO: add active_message_id, rename above to scheduling_message_id
+        // message_id is a u64, which sqlx does not want to stick in Sqlite.
+        /// Use get/set_message_id() functions
+        message_id: Option<String>,
+        // TODO: add active_message_id, rename above to scheduling_message_id
+    }
 }
 
 impl Race {
@@ -1144,7 +1132,7 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
 #[cfg(test)]
 mod test {
     use crate::discord::{
-        create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time, update_race,
+        create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time,
         Race, RaceState,
     };
     use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike};
@@ -1217,7 +1205,7 @@ mod test {
         let mid = MessageId(u64::MAX);
         race.set_message_id(mid);
         race.set_state(RaceState::ACTIVE);
-        update_race(&race, &pool).await.unwrap();
+        race.save(&pool).await;
 
         // it would be reasonable to add a get_race_by_id() kind of message, but I don't think it's
         // actually useful yet.
