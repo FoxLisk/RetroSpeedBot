@@ -271,7 +271,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
         for mut race in races {
             let msg = match bot_state
                 .cache
-                .message(scheduling_channel, race.get_message_id().unwrap())
+                .message(scheduling_channel, race.get_scheduling_message_id().unwrap())
             {
                 Some(m) => m,
                 None => {
@@ -283,7 +283,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
             // NB: as noted when building the cache, the msg.reactions field is not actually useful here
             let racing_reactions = match get_reactions(
                 scheduling_channel,
-                race.get_message_id().unwrap(),
+                race.get_scheduling_message_id().unwrap(),
                 racing_react.clone(),
                 bot_state.clone(),
             )
@@ -596,7 +596,7 @@ async fn add_race(
             {
                 Ok(ok) => {
                     if let Some(mut r) = race {
-                        r.set_message_id(ok.id);
+                        r.set_scheduling_message_id(ok.id);
                         r.save(pool).await;
                     }
                 }
@@ -725,7 +725,8 @@ async fn create_race(
                 game_id: game.id,
                 category_id: category.id,
                 occurs: ts,
-                message_id: None,
+                scheduling_message_id: None,
+                active_message_id: None,
                 state,
             })
         }
@@ -861,14 +862,16 @@ model! {
 
         // message_id is a u64, which sqlx does not want to stick in Sqlite.
         /// Use get/set_message_id() functions
-        message_id: Option<String>,
+        scheduling_message_id: Option<String>,
         // TODO: add active_message_id, rename above to scheduling_message_id
+
+        active_message_id: Option<String>,
     }
 }
 
 impl Race {
-    fn get_message_id(&self) -> Option<MessageId> {
-        match &self.message_id {
+    fn get_scheduling_message_id(&self) -> Option<MessageId> {
+        match &self.scheduling_message_id {
             Some(s) => match s.parse::<u64>() {
                 Ok(id) => Some(MessageId(id)),
                 Err(e) => {
@@ -881,8 +884,8 @@ impl Race {
     }
 
     // TODO: figure out how to make this accept a string too?
-    fn set_message_id(&mut self, id: MessageId) {
-        self.message_id = Some(id.to_string());
+    fn set_scheduling_message_id(&mut self, id: MessageId) {
+        self.scheduling_message_id = Some(id.to_string());
     }
 
     fn get_occurs(&self) -> DateTime<Tz> {
@@ -1200,10 +1203,10 @@ mod test {
         assert_eq!(race.occurs, when.timestamp());
         assert_eq!(race.category_id, c.id);
         assert_eq!(race.game_id, g.id);
-        assert_eq!(race.message_id, None);
+        assert_eq!(race.scheduling_message_id, None);
         assert_eq!(race.get_state(), RaceState::SCHEDULED);
         let mid = MessageId(u64::MAX);
-        race.set_message_id(mid);
+        race.set_scheduling_message_id(mid);
         race.set_state(RaceState::ACTIVE);
         race.save(&pool).await;
 
