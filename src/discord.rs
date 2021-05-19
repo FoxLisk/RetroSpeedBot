@@ -2,19 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::Arc;
 
+use custom_error::custom_error;
+
 use futures::stream::StreamExt;
 use tokio::sync::RwLock;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
 use twilight_command_parser::{Arguments, Command, CommandParserConfig, Parser};
 use twilight_gateway::cluster::ShardScheme;
 use twilight_gateway::{Cluster, Event};
+use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
-use twilight_model::guild::{Permissions, Role};
-use twilight_model::id::{ChannelId, EmojiId, MessageId, RoleId, UserId};
+use twilight_model::guild::{Emoji, Permissions, Role};
+use twilight_model::id::{ChannelId, EmojiId, GuildId, MessageId, RoleId, UserId};
 
-use crate::constants::{FOXLISK_USER_ID, SCHEDULING_CHANNEL_NAME};
+use crate::constants::{
+    FOXLISK_USER_ID, NOTIFY_BEFORE_RACE_SECS, RACING_EMOJI_NAME, SCHEDULING_CHANNEL_NAME,
+};
 use twilight_http::request::guild::role::CreateRole;
 
 use chrono::{DateTime, Duration as CDuration, Local, LocalResult, NaiveDateTime, TimeZone};
@@ -27,7 +32,9 @@ use std::fmt::{Display, Formatter};
 use std::iter::FromIterator;
 use std::str::FromStr;
 use tokio::time::Duration;
-use twilight_model::channel::ChannelType;
+use twilight_model::channel::message::MessageReaction;
+use twilight_model::channel::{ChannelType, ReactionType};
+use twilight_model::user::User;
 
 struct BotState {
     http: Client,
@@ -37,7 +44,39 @@ struct BotState {
     // these should be split by guild
     roles: RwLock<HashMap<String, Role>>,
     channels: RwLock<HashMap<String, ChannelId>>,
-    emojis: RwLock<HashMap<String, EmojiId>>,
+    emojis: RwLock<HashMap<String, Emoji>>,
+    // TODO: this can't possibly be the best way to do this lol
+    guild_id: RwLock<Option<GuildId>>,
+}
+
+impl BotState {
+    async fn get_guild_id(&self) -> Option<GuildId> {
+        let lock = self.guild_id.read().await;
+        (*lock).clone()
+    }
+
+    async fn get_role(&self, name: &str) -> Option<Role> {
+        let lock = self.roles.read().await;
+        match lock.get(name) {
+            Some(r) => Some(r.clone()),
+            None => None,
+        }
+    }
+}
+
+macro_rules! loop_until_success {
+    ($e:expr) => {
+        loop {
+            match $e {
+                Some(c) => {
+                    break c;
+                }
+                None => {}
+            };
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        }
+    };
 }
 
 /*
@@ -127,7 +166,8 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
                 | ResourceType::CHANNEL
                 | ResourceType::MEMBER
                 | ResourceType::USER_CURRENT
-                | ResourceType::ROLE,
+                | ResourceType::ROLE
+                | ResourceType::REACTION,
         )
         .build();
 
@@ -152,6 +192,7 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         roles: Default::default(),
         channels: Default::default(),
         emojis: Default::default(),
+        guild_id: Default::default(),
     });
 
     let pool = get_pool().await.unwrap();
@@ -196,11 +237,85 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
         1. if we've waited $LONG_ENOUGH, bug people again
       1. unsetting this stuff is probably going to require an !endrace from a mod for now. might hook into racetime in the future
      */
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 1));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 2));
+    let scheduling_channel: ChannelId =
+        loop_until_success!(get_scheduling_channel(bot_state.clone()).await);
+
+    let racing_react: ReactionType = loop_until_success!({
+        let lock = bot_state.emojis.read().await;
+        lock.get(RACING_EMOJI_NAME).map(|e| ReactionType::Custom {
+            animated: false,
+            id: e.id,
+            name: Some(e.name.clone()),
+        })
+    });
+
+    let unconfirmed_racer_role: Role =
+        loop_until_success!({ bot_state.get_role("unconfirmed-racer").await });
+
+    let commentating_react = ReactionType::Unicode {
+        name: "microphone2".to_string(),
+    };
+    let restreaming_react = ReactionType::Unicode {
+        name: "tv".to_string(),
+    };
+
+    debug!("Cron has found necessary state");
     loop {
         interval.tick().await;
+        debug!("Starting cron tick");
 
-        let races = get_upcoming_races(Duration::from_secs(60 * 30), &pool).await;
+        let races = get_upcoming_races(Duration::from_secs(NOTIFY_BEFORE_RACE_SECS), &pool).await;
+        for mut race in races {
+            let msg = match bot_state
+                .cache
+                .message(scheduling_channel, race.get_message_id().unwrap())
+            {
+                Some(m) => m,
+                None => {
+                    warn!("No scheduling message found for race {}", race.id);
+                    continue;
+                }
+            };
+
+            // NB: as noted when building the cache, the msg.reactions field is not actually useful here
+            let racing_reactions = match get_reactions(
+                scheduling_channel,
+                race.get_message_id().unwrap(),
+                racing_react.clone(),
+                bot_state.clone(),
+            )
+            .await
+            {
+                Ok(users) => users,
+                Err(e) => {
+                    warn!("Error fetching racing reactions for race {}", race.id);
+                    continue;
+                }
+            };
+
+            for user in racing_reactions {
+                add_role(user, &unconfirmed_racer_role, bot_state.clone()).await;
+            }
+
+            let fh = {
+                let lock = bot_state.channels.read().await;
+                lock.get("🦊fox-hole").unwrap().clone()
+            };
+            bot_state
+                .http
+                .create_message(fh)
+                .content(format!(
+                    "<@&{}> hi fox good job testing you're so smart",
+                    unconfirmed_racer_role.id
+                ))
+                .unwrap()
+                .await;
+
+            race.set_state(RaceState::ACTIVE);
+            update_race(&race, &pool).await;
+        }
+
         /*
         for race in races:
             check reacts on the scheduling message
@@ -221,18 +336,58 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 one problem here is tracking racers, potentially, if we've restarted since setting stuff in memory
 
          */
-        debug!("tick... tock...");
     }
+}
+
+custom_error! { AddRoleError{err: String} = "Error adding role to user: {err}" }
+
+// this should take GuildId but since this is single-guild for now we can sneak it off of the role
+async fn add_role(user: User, role: &Role, bot_state: Arc<BotState>) -> Result<(), AddRoleError> {
+    let gid = match bot_state.get_guild_id().await {
+        Some(g) => g,
+        None => {
+            return Err(AddRoleError {
+                err: "Cant find guild id???".to_string(),
+            });
+        }
+    };
+    match bot_state
+        .http
+        .add_guild_member_role(gid, user.id, role.id.clone())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            warn!("Error adding role");
+            Err(AddRoleError {
+                err: "Error adding role".to_string(),
+            })
+        }
+    }
+}
+
+/// N.B. this will return up to 100 reactions. If that ever becomes an issue, well, good problem to have!
+async fn get_reactions(
+    cid: ChannelId,
+    mid: MessageId,
+    react: ReactionType,
+    bot_state: Arc<BotState>,
+) -> Result<Vec<User>, twilight_http::error::Error> {
+    bot_state
+        .http
+        .reactions(cid, mid, RequestReactionType::from(react))
+        .await
+}
+
+async fn get_scheduling_channel(bot_state: Arc<BotState>) -> Option<ChannelId> {
+    let lock = bot_state.channels.read().await;
+    lock.get(SCHEDULING_CHANNEL_NAME).map(|f| f.clone())
 }
 
 async fn handle_events(
     bot_state: Arc<BotState>,
     pool: SqlitePool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let games = get_games(&pool).await;
-    for g in games {
-        println!("Game: {:?}", g);
-    }
     {
         let mut events = bot_state.cluster.events();
         while let Some((_, event)) = events.next().await {
@@ -260,6 +415,14 @@ async fn handle_event(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match event {
         Event::GuildCreate(msg) => {
+            if msg.name != "RetroSpeedRuns" {
+                warn!("Unexpected guild found! {}", msg.name);
+                return Ok(());
+            }
+            {
+                let mut lock = bot_state.guild_id.write().await;
+                *lock = Some(msg.id.clone());
+            }
             setup_roles(&msg, bot_state.clone()).await;
             setup_channels(&msg, bot_state.clone()).await;
             setup_emojis(&msg, bot_state.clone()).await;
@@ -300,6 +463,7 @@ async fn handle_event(
 
         // Check if these are on races that are *active* - if so, add/remove roles
         Event::ReactionAdd(ra) => {
+            debug!("Reaction added: {:?}", ra);
             /*
             if ra.emoji is one of the ones we care about:
                 let msg_id = get_msg(ra.message_id);
@@ -318,7 +482,9 @@ async fn handle_event(
                 or if they should be removed entirely.
              */
         }
-        Event::ReactionRemove(rr) => {}
+        Event::ReactionRemove(rr) => {
+            debug!("Reaction removed: {:?}", rr);
+        }
         _ => {}
     }
 
@@ -517,8 +683,8 @@ async fn _add_race(
                 warn!("Can't find raising hand emoji");
                 ":thumbup:".to_owned()
             }
-            Some(eid) => {
-                format!("<:raisinghand:{}>", eid)
+            Some(e) => {
+                format!("<:raisinghand:{}>", e.id)
             }
         }
     };
@@ -709,7 +875,6 @@ struct Race {
     // message_id is a u64, which sqlx does not want to stick in Sqlite.
     /// Use get/set_message_id() functions
     message_id: Option<String>,
-
     // TODO: add active_message_id, rename above to scheduling_message_id
 }
 
@@ -874,7 +1039,8 @@ async fn get_upcoming_races(window: Duration, pool: &SqlitePool) -> Vec<Race> {
 async fn setup_emojis(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
     let mut lock = bot_state.emojis.write().await;
     for e in &guild.emojis {
-        lock.insert(e.name.to_string(), e.id);
+        lock.insert(e.name.to_string(), e.clone());
+        debug!("Inserting emoji {}", e.name.to_string());
     }
 }
 
@@ -913,12 +1079,20 @@ async fn setup_channels(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
 }
 
 async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
-    let desired_roles = vec![DesiredRoleBuilder::default()
-        .name("active-racer".to_string())
-        .color(0xE74C3C)
-        .mentionable(true)
-        .build()
-        .unwrap()];
+    let desired_roles = vec![
+        DesiredRoleBuilder::default()
+            .name("active-racer".to_string())
+            .color(0xE74C3C)
+            .mentionable(true)
+            .build()
+            .unwrap(),
+        DesiredRoleBuilder::default()
+            .name("unconfirmed-racer".to_string())
+            .color(0xf7c9c4)
+            .mentionable(true)
+            .build()
+            .unwrap(),
+    ];
 
     let mut desired_roles_by_name: HashMap<String, DesiredRole> = Default::default();
     for role in desired_roles {
