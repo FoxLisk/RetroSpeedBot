@@ -15,10 +15,11 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Emoji, PartialMember, Permissions, Role};
-use twilight_model::id::{ChannelId, GuildId, MessageId, RoleId, UserId};
+use twilight_model::id::{ChannelId, GuildId, MessageId, RoleId, UserId, EmojiId};
 
 use crate::constants::{
-    FOXLISK_USER_ID, NOTIFY_BEFORE_RACE_SECS, RACING_EMOJI_NAME, SCHEDULING_CHANNEL_NAME,
+    ACTIVE_CHANNEL_NAME, FOXLISK_USER_ID, NOTIFY_BEFORE_RACE_SECS, RACING_EMOJI_NAME,
+    SCHEDULING_CHANNEL_NAME,
 };
 use twilight_http::request::guild::role::CreateRole;
 
@@ -34,6 +35,7 @@ use twilight_model::channel::{ChannelType, ReactionType};
 use twilight_model::user::User;
 
 use crate::models::{Category, Game, Race, RaceState};
+use lru::LruCache;
 
 struct BotState {
     http: Client,
@@ -46,6 +48,29 @@ struct BotState {
     emojis: RwLock<HashMap<String, Emoji>>,
     // TODO: this can't possibly be the best way to do this lol
     guild_id: RwLock<Option<GuildId>>,
+}
+
+enum Reactions {
+    CONFIRMING,
+    COMMENTATING,
+    RESTREAMING,
+}
+
+impl Reactions {
+    fn get_reaction_type(&self) -> ReactionType {
+        ReactionType::Unicode {
+            name: self.get_name(),
+        }
+    }
+
+    fn get_name(&self) -> String {
+        match self {
+            Reactions::CONFIRMING => "✅".to_string(),
+
+            Reactions::COMMENTATING => "microphone2".to_string(),
+            Reactions::RESTREAMING => "tv".to_string(),
+        }
+    }
 }
 
 impl BotState {
@@ -169,6 +194,11 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
                 | ResourceType::REACTION,
         )
         .build();
+    //
+    // bot_state
+    //     .http
+    //     .reactions(ChannelId(842995854742913034), MessageId(844810617646088192), RequestReactionType::Unicode {}
+    //     .await
 
     let mut command_config = CommandParserConfig::new();
 
@@ -196,6 +226,12 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         guild_id: Default::default(),
     });
 
+    let foxhole_msgs = bot_state
+        .http
+        .channel_messages(ChannelId(842995854742913034))
+        .await;
+    debug!("{:?}", foxhole_msgs);
+
     let pool = get_pool().await.unwrap();
 
     let jh = tokio::spawn(handle_events(bot_state.clone(), pool.clone()));
@@ -214,6 +250,17 @@ async fn get_pool() -> Result<SqlitePool, sqlx::Error> {
         .max_connections(12)
         .connect(&path_with_params)
         .await
+}
+
+// TODO: make this configurable?
+fn nag_times(max: i64) -> Vec<i64> {
+    // times, in minutes, from start-time at which racers should be alerted
+    // must go from smallest to largest
+    // i.e. vec![15, 30] means racers should be alerted once at 30 minutes-to-race-time and again
+    // at 15-minutes-to-race-time
+    // let times = vec![15, 30];
+    let times = vec![1, 4];
+    times.into_iter().take_while(|i| *i < max).collect()
 }
 
 async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
@@ -238,10 +285,13 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
         1. if we've waited $LONG_ENOUGH, bug people again
       1. unsetting this stuff is probably going to require an !endrace from a mod for now. might hook into racetime in the future
      */
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 2));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60 * 1));
+    // honestly, 5 would be fine, but who wants to worry?
+    let mut sent_nags: LruCache<i64, Vec<i64>> = LruCache::new(100);
     let scheduling_channel: ChannelId =
         loop_until_success!(get_scheduling_channel(bot_state.clone()).await);
-
+    let active_channel: ChannelId =
+        loop_until_success!(get_active_channel(bot_state.clone()).await);
     let racing_react: ReactionType = loop_until_success!({
         let lock = bot_state.emojis.read().await;
         lock.get(RACING_EMOJI_NAME).map(|e| ReactionType::Custom {
@@ -254,24 +304,24 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
     let unconfirmed_racer_role: Role =
         loop_until_success!({ bot_state.get_role("unconfirmed-racer").await });
 
-    let commentating_react = ReactionType::Unicode {
-        name: "microphone2".to_string(),
-    };
-    let restreaming_react = ReactionType::Unicode {
-        name: "tv".to_string(),
-    };
+    let confirmed_racer_role: Role =
+        loop_until_success!({ bot_state.get_role("active-racer").await });
 
     debug!("Cron has found necessary state");
     loop {
         interval.tick().await;
         debug!("Starting cron tick");
 
+        let start_time_eastern = Local::now().with_timezone(&Eastern);
+
         let races = get_upcoming_races(Duration::from_secs(NOTIFY_BEFORE_RACE_SECS), &pool).await;
         for race in races {
+            debug!("Handling upcoming race {}", race);
             handle_upcoming_race(
                 bot_state.clone(),
                 &pool,
                 scheduling_channel,
+                active_channel,
                 &racing_react,
                 &unconfirmed_racer_role,
                 race,
@@ -279,26 +329,80 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
             .await;
         }
 
-        /*
-        for race in races:
-            check reacts on the scheduling message
-            set interested-* roles
-            @message ppl (where? do we want a dedicated channel for this?)
-            set race to ACTIVE
+        let active_races = get_active_races(&pool).await;
 
-        let active = get_active_races()
-        for race in active:
-            check reacts on the @message from before
-            swap ready-* roles out for active-* roles
-            if (some condition such as (mins until race % 5 == 0)) {
-                @message interested-* ppl who haven't confirmed yet
+        for mut active_race in active_races {
+            debug!("Handling active race {}", active_race);
+            let confirmed_reactions = match get_reactions_for(
+                bot_state.clone(),
+                active_channel,
+                active_race.get_active_message_id().unwrap(),
+                Reactions::CONFIRMING.get_reaction_type(),
+            )
+            .await
+            {
+                Some(users) => users,
+                None => {
+                    continue;
+                }
+            };
+
+            for user in confirmed_reactions {
+                if user.id == bot_state.cache.current_user().unwrap().id {
+                    continue;
+                }
+                remove_role(&user, &unconfirmed_racer_role, bot_state.clone()).await;
+                add_role(&user, &confirmed_racer_role, bot_state.clone()).await;
             }
-            if the start time has passed, shut up
-                or perhaps keep pinging until a mod says !startrace or something?
-            if start time passed, like, 2 hours ago or something, remove the racer roles
-                one problem here is tracking racers, potentially, if we've restarted since setting stuff in memory
 
-         */
+            // races shouldn't last 3 hours!
+            // unless we start doing chrono trigger or something
+            let time_til_start = active_race.get_occurs() - start_time_eastern;
+            let minutes_til_start = time_til_start.num_minutes();
+            if time_til_start.num_hours() < -2 {
+                // long past
+                active_race.set_state(RaceState::COMPLETED);
+                active_race.save(&pool).await;
+                continue;
+            }
+
+            if !sent_nags.contains(&active_race.id) {
+                sent_nags.put(active_race.id, nag_times(time_til_start.num_minutes()));
+            }
+            let nags = sent_nags.get_mut(&active_race.id).unwrap();
+            let do_nag = match nags.pop() {
+                Some(time) => {
+                    if minutes_til_start < time {
+                        true
+                    } else {
+                        nags.push(time);
+                        false
+                    }
+                }
+                None => false,
+            };
+            debug!("Finished with active race");
+        }
+        debug!("Finished with active races");
+    }
+}
+
+async fn get_reactions_for(
+    bot_state: Arc<BotState>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    react_type: ReactionType,
+) -> Option<Vec<User>> {
+    // NB: as noted when building the cache, the msg.reactions field is not actually useful here
+    match get_reactions(channel_id, message_id, react_type, bot_state.clone()).await {
+        Ok(users) => Some(users),
+        Err(e) => {
+            warn!(
+                "Error fetching reactions for message {} in channel {}: {}",
+                message_id, channel_id, e
+            );
+            None
+        }
     }
 }
 
@@ -308,60 +412,58 @@ async fn handle_upcoming_race(
     bot_state: Arc<BotState>,
     pool: &SqlitePool,
     scheduling_channel: ChannelId,
+    active_channel: ChannelId,
     racing_react: &ReactionType,
     unconfirmed_racer_role: &Role,
     mut race: Race,
 ) {
-    match bot_state.cache.message(
-        scheduling_channel,
-        race.get_scheduling_message_id().unwrap(),
-    ) {
-        Some(_) => {}
-        None => {
-            warn!("No scheduling message found for race {}", race.id);
-            return;
-        }
-    };
-
+    /*
+       check reacts on the scheduling message
+       set interested-* roles
+       @message ppl (where? do we want a dedicated channel for this?)
+       set race to ACTIVE
+    */
     // NB: as noted when building the cache, the msg.reactions field is not actually useful here
-    let racing_reactions = match get_reactions(
+    let racing_reactions = match get_reactions_for(
+        bot_state.clone(),
         scheduling_channel,
         race.get_scheduling_message_id().unwrap(),
         racing_react.clone(),
-        bot_state.clone(),
     )
     .await
     {
-        Ok(users) => users,
-        Err(e) => {
-            warn!(
-                "Error fetching racing reactions for race {}: {}",
-                race.id, e
-            );
+        Some(users) => users,
+        None => {
             return;
         }
     };
 
     for user in racing_reactions {
-        add_role(user, &unconfirmed_racer_role, bot_state.clone()).await;
+        if user.id == bot_state.cache.current_user().unwrap().id {
+            continue;
+        }
+        add_role(&user, &unconfirmed_racer_role, bot_state.clone()).await;
     }
 
-    let fh = {
-        let lock = bot_state.channels.read().await;
-        lock.get("🦊fox-hole").unwrap().clone()
-    };
     match bot_state
         .http
-        .create_message(fh)
+        .create_message(active_channel)
         .content(format!(
-            "<@&{}> hi fox good job testing you're so smart",
-            unconfirmed_racer_role.id
+            "<@&{}> You reported interest in the {} - {} race at {}. React with :{}: to confirm please.",
+            unconfirmed_racer_role.id,
+            Game::get_by_id(race.game_id, pool).await.unwrap().name_pretty,
+            Category::get_by_id(race.category_id, pool).await.unwrap().name_pretty,
+            race.get_occurs(),
+            Reactions::CONFIRMING.get_name()
         ))
         .unwrap()
         .await
     {
         Ok(m) => {
             race.set_active_message_id(m.id);
+            bot_state.http
+                .create_reaction(active_channel, m.id, RequestReactionType::from(Reactions::CONFIRMING.get_reaction_type())).await;
+
         }
         Err(e) => {
             warn!("Error creating confirmation message: {}", e);
@@ -374,8 +476,13 @@ async fn handle_upcoming_race(
 
 custom_error! { AddRoleError{err: String} = "Error adding role to user: {err}" }
 
+// TODO: add/remove roles are identical except for the http function they call
+// this is not a hard problem to solve
+// although probably it should be solved by taking an FnMut or something
+// the easy ("easy") way is to just do a macro
+
 // this should take GuildId but since this is single-guild for now we can sneak it off of the role
-async fn add_role(user: User, role: &Role, bot_state: Arc<BotState>) -> Result<(), AddRoleError> {
+async fn add_role(user: &User, role: &Role, bot_state: Arc<BotState>) -> Result<(), AddRoleError> {
     let gid = match bot_state.get_guild_id().await {
         Some(g) => g,
         None => {
@@ -387,6 +494,35 @@ async fn add_role(user: User, role: &Role, bot_state: Arc<BotState>) -> Result<(
     match bot_state
         .http
         .add_guild_member_role(gid, user.id, role.id.clone())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            warn!("Error adding role: {}", e);
+            Err(AddRoleError {
+                err: "Error adding role".to_string(),
+            })
+        }
+    }
+}
+
+// this should take GuildId but since this is single-guild for now we can sneak it off of the role
+async fn remove_role(
+    user: &User,
+    role: &Role,
+    bot_state: Arc<BotState>,
+) -> Result<(), AddRoleError> {
+    let gid = match bot_state.get_guild_id().await {
+        Some(g) => g,
+        None => {
+            return Err(AddRoleError {
+                err: "Cant find guild id???".to_string(),
+            });
+        }
+    };
+    match bot_state
+        .http
+        .remove_guild_member_role(gid, user.id, role.id.clone())
         .await
     {
         Ok(()) => Ok(()),
@@ -415,6 +551,11 @@ async fn get_reactions(
 async fn get_scheduling_channel(bot_state: Arc<BotState>) -> Option<ChannelId> {
     let lock = bot_state.channels.read().await;
     lock.get(SCHEDULING_CHANNEL_NAME).map(|f| f.clone())
+}
+
+async fn get_active_channel(bot_state: Arc<BotState>) -> Option<ChannelId> {
+    let lock = bot_state.channels.read().await;
+    lock.get(ACTIVE_CHANNEL_NAME).map(|f| f.clone())
 }
 
 async fn handle_events(
@@ -682,6 +823,35 @@ async fn add_race(
                         r.set_scheduling_message_id(ok.id);
                         r.save(pool).await;
                     }
+
+
+                    let racer_react_type = {
+                        let lock = bot_state.emojis.read().await;
+                        match lock.get("raisinghand") {
+                            None => {
+                                warn!("Can't find raising hand emoji");
+                                None
+                            }
+                            Some(e) => {
+                                Some(ReactionType::Custom {
+                                    animated: false,
+                                    id: e.id,
+                                    name: Some(e.name.clone()),
+                                })
+
+                            }
+                        }
+                    };
+
+                    for r in vec![racer_react_type, Some(Reactions::COMMENTATING.get_reaction_type()), Some(Reactions::RESTREAMING.get_reaction_type())] {
+                        match r {
+                            Some(reac) => {
+                                bot_state.http
+                                    .create_reaction(cid, ok.id, RequestReactionType::from(reac)).await;
+                            },
+                            None => {}
+                            }
+                    }
                 }
                 Err(e) => {
                     warn!("Error creating scheduling message: {}", e);
@@ -753,7 +923,7 @@ async fn _add_race(
     };
 
     let r = match create_race(&game, &cat, occurs, pool).await {
-        Some(r) => Some(r),
+        Some(r) => r,
         None => {
             return (
                 "Unknown error creating the race. Bug Fox about it.".to_owned(),
@@ -763,15 +933,15 @@ async fn _add_race(
         }
     };
 
-    let racer_react = {
+    let (racer_react_name, racer_react_id) = {
         let lock = bot_state.emojis.read().await;
         match lock.get("raisinghand") {
             None => {
                 warn!("Can't find raising hand emoji");
-                ":thumbup:".to_owned()
+                (":thumbup:".to_owned(), EmojiId(0))
             }
             Some(e) => {
-                format!("<:raisinghand:{}>", e.id)
+                ("raisinghand".to_string(), e.id)
             }
         }
     };
@@ -779,17 +949,23 @@ async fn _add_race(
     let schedule_content = format!(
         "There will be a race of {} - {} on {}.
 
-If you are interested in racing, react with {}
-If you are available to commentate, react with :microphone2:
-If you are able to restream, react with :tv:
+If you are interested in racing, react with <:{}:{}>
+If you are available to commentate, react with :{}:
+If you are able to restream, react with :{}:
+
+(Mod note: This is Race #{})
 ",
         game.name_pretty,
         cat.name_pretty,
         occurs.format("%A, %B %d at %I:%M%p %Z"),
-        racer_react
+        racer_react_name, racer_react_id,
+        Reactions::COMMENTATING.get_name(),
+        Reactions::RESTREAMING.get_name(),
+        r.id,
     );
 
-    ("Race created!".to_string(), Some(schedule_content), r)
+
+    ("Race created!".to_string(), Some(schedule_content), Some(r))
 }
 
 async fn end_race(
@@ -863,18 +1039,22 @@ async fn _end_race(oid: Option<i64>, pool: &SqlitePool) -> String {
 /// Gets the currently active race. If more than one is found, returns None
 // this is just to make the types line up more easily but it might suck?
 async fn get_active_race(pool: &SqlitePool) -> Option<Race> {
-    let state = RaceState::ACTIVE.to_string();
-    let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE state = ?", state);
-    // let rows: Pin<Box<dyn futures::Stream<Item = std::result::Result<Race, sqlx::Error>> + std::marker::Send>> = q.fetch(pool);
-    let rows = q.fetch(pool);
-
-    let mut races = rows.map(|r| r.unwrap()).collect::<Vec<Race>>().await;
+    let mut races = get_active_races(pool).await;
     let ret = races.pop();
     if !races.is_empty() {
         info!("Found multiple active races");
         return None;
     }
     ret
+}
+
+/// Gets all currently active races.
+async fn get_active_races(pool: &SqlitePool) -> Vec<Race> {
+    let state = RaceState::ACTIVE.to_string();
+    let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE state = ?", state);
+    let rows = q.fetch(pool);
+
+    rows.map(|r| r.unwrap()).collect::<Vec<Race>>().await
 }
 
 // TODO: This creates a race with null message_id and state SCHEDULED, always. Is that bad?
@@ -1183,17 +1363,58 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
 mod test {
     use crate::discord::{
         create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time, RaceState,
-        _end_race,
+        _end_race, nag_times,
     };
     use crate::models::Race;
-    use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike};
+    use chrono::{DateTime, Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike};
+    use chrono_tz::Tz;
     use chrono_tz::US::Eastern;
+    use lru::LruCache;
     use sqlx::SqlitePool;
     use tokio::time::Duration;
     use twilight_model::id::MessageId;
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn test_nag_times() {
+        assert_eq!(vec![15, 30], nag_times(999));
+        assert_eq!(vec![15], nag_times(27));
+        assert_eq!(vec![] as Vec<i64>, nag_times(2));
+    }
+
+    #[test]
+    fn test_lru_thing() {
+        let mut cache: LruCache<i64, Vec<i32>> = LruCache::new(3);
+        cache.put(1, vec![5, 15, 30]);
+
+        {
+            let rn = cache.get(&1).unwrap();
+            assert_eq!(&vec![5, 15, 30], rn);
+        }
+        let mrn = cache.get_mut(&1).unwrap();
+
+        match mrn.pop() {
+            Some(time) => {
+                assert_eq!(time, 30);
+            }
+            None => {}
+        }
+        {
+            let rn = cache.get(&1).unwrap();
+            assert_eq!(&vec![5, 15], rn);
+        }
+    }
+
+    #[test]
+    fn test_vec_semantics() {
+        let v = vec![9, 8, 7];
+        let f = v.first();
+        assert_eq!(Some(&9), f);
+        let f2 = v.first();
+        assert_eq!(Some(&9), f2);
     }
 
     async fn initdb(pool: &SqlitePool) {
@@ -1216,6 +1437,14 @@ mod test {
         init();
         let ndt = NaiveDateTime::parse_from_str("06/09/2021 11:00pm", "%m/%d/%Y %I:%M%P");
         ndt.unwrap();
+
+        let now: DateTime<Tz> = Local::now().with_timezone(&Eastern);
+        std::thread::sleep(Duration::from_millis(5));
+        let nower: DateTime<Tz> = Local::now().with_timezone(&Eastern);
+        let fwd = nower - now;
+        assert!(fwd.num_milliseconds() > 4);
+        let backwd = now - nower;
+        assert!(backwd.num_milliseconds() < -4);
     }
 
     #[test]
@@ -1363,10 +1592,7 @@ mod test {
         r.set_state(RaceState::ACTIVE);
         r.save(&pool).await;
 
-        assert_eq!(
-            format!("{} completed.", r),
-            _end_race(None, &pool).await
-        );
+        assert_eq!(format!("{} completed.", r), _end_race(None, &pool).await);
 
         let refreshed = Race::get_by_id(r.id, &pool).await.unwrap();
         assert_eq!(RaceState::COMPLETED, refreshed.get_state());
@@ -1388,9 +1614,14 @@ mod test {
         r.save(&pool).await;
 
         let time_add = CDuration::from_std(Duration::from_secs(60)).unwrap();
-        let mut r2 = create_race(&g, &c, (Local::now() + time_add).with_timezone(&Eastern), &pool)
-            .await
-            .unwrap();
+        let mut r2 = create_race(
+            &g,
+            &c,
+            (Local::now() + time_add).with_timezone(&Eastern),
+            &pool,
+        )
+        .await
+        .unwrap();
 
         r2.set_state(RaceState::ACTIVE);
         r2.save(&pool).await;
@@ -1406,7 +1637,6 @@ mod test {
         assert_eq!(RaceState::ACTIVE, refreshed2.get_state());
     }
 
-
     #[tokio::test(flavor = "multi_thread")]
     async fn test_end_race_none_active() {
         init();
@@ -1417,6 +1647,5 @@ mod test {
             format!("No valid race found."),
             _end_race(None, &pool).await
         );
-
     }
 }

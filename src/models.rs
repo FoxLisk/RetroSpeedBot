@@ -1,8 +1,9 @@
-use chrono::DateTime;
+use chrono::{DateTime, Utc, TimeZone};
 use procm::model;
 use twilight_model::id::MessageId;
 
 use chrono_tz::Tz;
+use chrono_tz::US::Eastern;
 use sqlx::SqlitePool;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -151,7 +152,7 @@ impl Race {
     }
 
     pub(crate) fn get_occurs(&self) -> DateTime<Tz> {
-        unimplemented!()
+        Utc.timestamp(self.occurs, 0).with_timezone(&Eastern)
     }
 
     pub(crate) fn set_occurs(&mut self, occurs: DateTime<Tz>) {
@@ -171,5 +172,19 @@ impl Display for Race {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO: hydrate game/cat and print them in here?
         write!(f, "Race #{}", self.id)
+    }
+}
+
+mod tests {
+    use crate::models::Race;
+    use chrono::{Local, Timelike};
+
+    #[test]
+    fn test_timezone_roundtrip() {
+        let mut r = Race::new(1, 1, 1, Local::now().with_timezone(&chrono_tz::US::Eastern));
+        let time = Local::now().with_timezone(&chrono_tz::US::Eastern);
+        r.set_occurs(time);
+        assert_eq!(r.get_occurs().timestamp(), time.timestamp());
+        assert_eq!(time.with_nanosecond(0).unwrap(), r.get_occurs());
     }
 }

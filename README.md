@@ -51,17 +51,17 @@ and sends them back to discord. the point here being to separate out the DB acce
 
 ## critical path TODOs:
 
- * actually do stuff when race time is getting closer
-   * extensive comments about this in code now
+ * remove uncomfirmed/active-* roles
+   * this is going to require tracking who has them, or else periodically pulling the full server list and
+   * cleaning house.
  * get it running on linux (hopefully (*gulp*) this is easy)
  * races should have a notes field - stuff like "for new runners".
  * a command to delete a race
 
 ## misc TODOs - not any special order:
 
+ * Handle any kind of internet outage? idk if it's worth it vs just restarting *shrug*
  * Rate limit the bot
- * add a `!commands` command, or similar
- * pre-populate race reactions
  * ORM stuff is looking more and more desireable
    * OMFG look into this!!! https://docs.rs/ormx/0.7.0/ormx/
    * the documentation is - of course! - a total joke, but maybe very useful.
