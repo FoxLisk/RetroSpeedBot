@@ -34,17 +34,18 @@ pub fn model(input: TokenStream) -> TokenStream {
 
     let values_str = format!(" {} ", field_names.join(", "));
     let update_str = format!(" UPDATE {} SET {} WHERE id = ?", name, values_str);
+    let query_str = format!("SELECT * FROM {} WHERE id = ?", name);
 
     let expanded = quote! {
         #tokens
 
         impl #name {
-            async fn save(&self, pool: &SqlitePool) -> sqlx::Result<()> {
-            let q = sqlx::query![
-                    #update_str,
-                    #field_params // #field_params ends with a trailing comma, which sucks but /shrug
-                    self.id
-            ];
+            pub(crate) async fn save(&self, pool: &SqlitePool) -> sqlx::Result<()> {
+                let q = sqlx::query![
+                        #update_str,
+                        #field_params // #field_params ends with a trailing comma, which sucks but /shrug
+                        self.id
+                ];
 
                 debug!("Updating {:?}", self);
 
@@ -53,11 +54,17 @@ pub fn model(input: TokenStream) -> TokenStream {
                     Err(e) => Err(e),
                 }
             }
-        }
 
+        pub(crate) async fn get_by_id(id: i64, pool: &SqlitePool) -> Option<Self> {
+                let q = sqlx::query_as!(#name, #query_str, id);
+                match q.fetch_one(pool).await {
+                    Ok(r) => Some(r),
+                    Err(e) => { warn!("Error fetching by id: {}", e); None}
+                }
+            }
+        }
     };
 
     println!("{:?}", expanded.to_string());
-
     TokenStream::from(expanded)
 }

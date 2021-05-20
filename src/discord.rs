@@ -7,15 +7,15 @@ use custom_error::custom_error;
 use futures::stream::StreamExt;
 use tokio::sync::RwLock;
 use twilight_cache_inmemory::{InMemoryCache, ResourceType};
-use twilight_command_parser::{Arguments, Command, CommandParserConfig, Parser};
+use twilight_command_parser::{Arguments, CaseSensitivity, Command, CommandParserConfig, Parser};
 use twilight_gateway::cluster::ShardScheme;
 use twilight_gateway::{Cluster, Event};
 use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
-use twilight_model::guild::{Emoji, Permissions, Role};
-use twilight_model::id::{ChannelId, EmojiId, GuildId, MessageId, RoleId, UserId};
+use twilight_model::guild::{Emoji, PartialMember, Permissions, Role};
+use twilight_model::id::{ChannelId, GuildId, MessageId, RoleId, UserId};
 
 use crate::constants::{
     FOXLISK_USER_ID, NOTIFY_BEFORE_RACE_SECS, RACING_EMOJI_NAME, SCHEDULING_CHANNEL_NAME,
@@ -28,15 +28,12 @@ use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
-use std::fmt::{Display, Formatter};
 use std::iter::FromIterator;
-use std::str::FromStr;
 use tokio::time::Duration;
-use twilight_model::channel::message::MessageReaction;
 use twilight_model::channel::{ChannelType, ReactionType};
 use twilight_model::user::User;
 
-use procm::model;
+use crate::models::{Category, Game, Race, RaceState};
 
 struct BotState {
     http: Client,
@@ -182,6 +179,8 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
     command_config.add_command("listgames", true);
     command_config.add_command("listcategories", true);
     command_config.add_command("newrace", true);
+    command_config.add_command("endrace", true);
+    command_config.add_command("commands", true);
     command_config.add_prefix("!");
 
     let parser = Parser::new(command_config);
@@ -268,54 +267,16 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
         debug!("Starting cron tick");
 
         let races = get_upcoming_races(Duration::from_secs(NOTIFY_BEFORE_RACE_SECS), &pool).await;
-        for mut race in races {
-            let msg = match bot_state
-                .cache
-                .message(scheduling_channel, race.get_scheduling_message_id().unwrap())
-            {
-                Some(m) => m,
-                None => {
-                    warn!("No scheduling message found for race {}", race.id);
-                    continue;
-                }
-            };
-
-            // NB: as noted when building the cache, the msg.reactions field is not actually useful here
-            let racing_reactions = match get_reactions(
-                scheduling_channel,
-                race.get_scheduling_message_id().unwrap(),
-                racing_react.clone(),
+        for race in races {
+            handle_upcoming_race(
                 bot_state.clone(),
+                &pool,
+                scheduling_channel,
+                &racing_react,
+                &unconfirmed_racer_role,
+                race,
             )
-            .await
-            {
-                Ok(users) => users,
-                Err(e) => {
-                    warn!("Error fetching racing reactions for race {}", race.id);
-                    continue;
-                }
-            };
-
-            for user in racing_reactions {
-                add_role(user, &unconfirmed_racer_role, bot_state.clone()).await;
-            }
-
-            let fh = {
-                let lock = bot_state.channels.read().await;
-                lock.get("🦊fox-hole").unwrap().clone()
-            };
-            bot_state
-                .http
-                .create_message(fh)
-                .content(format!(
-                    "<@&{}> hi fox good job testing you're so smart",
-                    unconfirmed_racer_role.id
-                ))
-                .unwrap()
-                .await;
-
-            race.set_state(RaceState::ACTIVE);
-            race.save(&pool).await;
+            .await;
         }
 
         /*
@@ -341,6 +302,76 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
     }
 }
 
+// this is a lot of parameters, but it's also annoying to get the reacts and channel ids and stuff
+// in here. idk man.
+async fn handle_upcoming_race(
+    bot_state: Arc<BotState>,
+    pool: &SqlitePool,
+    scheduling_channel: ChannelId,
+    racing_react: &ReactionType,
+    unconfirmed_racer_role: &Role,
+    mut race: Race,
+) {
+    match bot_state.cache.message(
+        scheduling_channel,
+        race.get_scheduling_message_id().unwrap(),
+    ) {
+        Some(_) => {}
+        None => {
+            warn!("No scheduling message found for race {}", race.id);
+            return;
+        }
+    };
+
+    // NB: as noted when building the cache, the msg.reactions field is not actually useful here
+    let racing_reactions = match get_reactions(
+        scheduling_channel,
+        race.get_scheduling_message_id().unwrap(),
+        racing_react.clone(),
+        bot_state.clone(),
+    )
+    .await
+    {
+        Ok(users) => users,
+        Err(e) => {
+            warn!(
+                "Error fetching racing reactions for race {}: {}",
+                race.id, e
+            );
+            return;
+        }
+    };
+
+    for user in racing_reactions {
+        add_role(user, &unconfirmed_racer_role, bot_state.clone()).await;
+    }
+
+    let fh = {
+        let lock = bot_state.channels.read().await;
+        lock.get("🦊fox-hole").unwrap().clone()
+    };
+    match bot_state
+        .http
+        .create_message(fh)
+        .content(format!(
+            "<@&{}> hi fox good job testing you're so smart",
+            unconfirmed_racer_role.id
+        ))
+        .unwrap()
+        .await
+    {
+        Ok(m) => {
+            race.set_active_message_id(m.id);
+        }
+        Err(e) => {
+            warn!("Error creating confirmation message: {}", e);
+        }
+    }
+
+    race.set_state(RaceState::ACTIVE);
+    race.save(&pool).await;
+}
+
 custom_error! { AddRoleError{err: String} = "Error adding role to user: {err}" }
 
 // this should take GuildId but since this is single-guild for now we can sneak it off of the role
@@ -360,7 +391,7 @@ async fn add_role(user: User, role: &Role, bot_state: Arc<BotState>) -> Result<(
     {
         Ok(()) => Ok(()),
         Err(e) => {
-            warn!("Error adding role");
+            warn!("Error adding role: {}", e);
             Err(AddRoleError {
                 err: "Error adding role".to_string(),
             })
@@ -415,6 +446,27 @@ async fn handle_event(
     bot_state: Arc<BotState>,
     pool: &SqlitePool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let commands = bot_state
+        .parser
+        .config()
+        .commands()
+        .map(|c| {
+            format!(
+                "{}{}",
+                bot_state.parser.config().prefixes().next().unwrap(),
+                match c {
+                    CaseSensitivity::Insensitive(cmd) => {
+                        cmd.clone().into_inner()
+                    }
+                    CaseSensitivity::Sensitive(cmd) => {
+                        cmd.to_string()
+                    }
+                }
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let commands_resp = format!("Available commands: {}", commands);
     match event {
         Event::GuildCreate(msg) => {
             if msg.name != "RetroSpeedRuns" {
@@ -456,6 +508,21 @@ async fn handle_event(
                 name: "newrace",
                 ..
             }) => add_race(&msg, arguments, bot_state.clone(), pool).await,
+            Some(Command {
+                arguments,
+                name: "endrace",
+                ..
+            }) => end_race(&msg, arguments, bot_state.clone(), pool).await,
+            Some(Command {
+                name: "commands", ..
+            }) => {
+                bot_state
+                    .http
+                    .create_message(msg.channel_id)
+                    .content(commands_resp)
+                    .unwrap()
+                    .await;
+            }
             _ => {}
         },
         Event::ShardConnected(_) => {
@@ -534,19 +601,19 @@ async fn _list_categories(mut args: Arguments<'_>, pool: &SqlitePool) -> String 
     msg_parts.join("\n")
 }
 
-async fn add_race(
-    msg: &Box<MessageCreate>,
-    args: Arguments<'_>,
+async fn has_any_role(
+    user: PartialMember,
+    guild_id: GuildId,
     bot_state: Arc<BotState>,
-    pool: &SqlitePool,
-) {
+    roles: Vec<&str>,
+) -> bool {
     // note: this is mega annoying and probably pretty slow to do in here.
-    let user_roles: HashSet<RoleId> =
-        HashSet::from_iter(msg.member.as_ref().unwrap().roles.iter().cloned());
-    let guild_roles = bot_state.cache.guild_roles(msg.guild_id.unwrap()).unwrap();
-    let mut valid_role_names = HashSet::new();
-    valid_role_names.insert("Moderator".to_owned());
-    valid_role_names.insert("Admin".to_owned());
+    let user_roles: HashSet<RoleId> = HashSet::from_iter(user.roles.iter().cloned());
+    let guild_roles = bot_state.cache.guild_roles(guild_id).unwrap();
+    let roles = roles.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+    // i do not understand why the ::<_> bullshit is required here
+    // stolen from https://stackoverflow.com/questions/62949404/cannot-infer-type-for-type-parameter-s-when-using-hashsetfrom-iter
+    let valid_role_names = HashSet::<_>::from_iter(roles);
 
     let mut permitted = false;
     for r in &guild_roles {
@@ -556,6 +623,22 @@ async fn add_race(
             break;
         }
     }
+    permitted
+}
+
+async fn add_race(
+    msg: &Box<MessageCreate>,
+    args: Arguments<'_>,
+    bot_state: Arc<BotState>,
+    pool: &SqlitePool,
+) {
+    let permitted = has_any_role(
+        msg.member.clone().unwrap(),
+        msg.guild_id.unwrap(),
+        bot_state.clone(),
+        vec!["Moderator", "Admin"],
+    )
+    .await;
 
     if !permitted {
         bot_state
@@ -600,7 +683,9 @@ async fn add_race(
                         r.save(pool).await;
                     }
                 }
-                Err(_) => {}
+                Err(e) => {
+                    warn!("Error creating scheduling message: {}", e);
+                }
             }
         }
     }
@@ -707,6 +792,91 @@ If you are able to restream, react with :tv:
     ("Race created!".to_string(), Some(schedule_content), r)
 }
 
+async fn end_race(
+    msg: &Box<MessageCreate>,
+    mut args: Arguments<'_>,
+    bot_state: Arc<BotState>,
+    pool: &SqlitePool,
+) {
+    let permitted = has_any_role(
+        msg.member.clone().unwrap(),
+        msg.guild_id.unwrap(),
+        bot_state.clone(),
+        vec!["Moderator", "Admin"],
+    )
+    .await;
+
+    if !permitted {
+        bot_state
+            .http
+            .create_message(msg.channel_id)
+            .content("You are not authorized to create races.")
+            .unwrap()
+            .await;
+        return;
+    }
+
+    let id = match args.next() {
+        Some(arg) => match arg.parse::<i64>() {
+            Ok(_id) => Some(_id),
+            Err(_) => {
+                bot_state.http
+                    .create_message(msg.channel_id)
+                    .content("Please specify a race id, or nothing if you want to try to end the currently active race").unwrap().await;
+                return;
+            }
+        },
+        None => None,
+    };
+
+    let content = _end_race(id, pool).await;
+
+    bot_state
+        .http
+        .create_message(msg.channel_id)
+        .content(content)
+        .unwrap()
+        .await;
+}
+
+async fn _end_race(oid: Option<i64>, pool: &SqlitePool) -> String {
+    let orace = match oid {
+        Some(rid) => Race::get_by_id(rid, pool).await,
+        None => get_active_race(pool).await,
+    };
+
+    match orace {
+        Some(mut race) => match race.get_state() {
+            RaceState::ACTIVE => {
+                race.set_state(RaceState::COMPLETED);
+                race.save(pool).await;
+                format!("{} completed.", race)
+            }
+            _ => {
+                format!("{} is not currently active.", race)
+            }
+        },
+        None => "No valid race found.".to_string(),
+    }
+}
+
+/// Gets the currently active race. If more than one is found, returns None
+// this is just to make the types line up more easily but it might suck?
+async fn get_active_race(pool: &SqlitePool) -> Option<Race> {
+    let state = RaceState::ACTIVE.to_string();
+    let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE state = ?", state);
+    // let rows: Pin<Box<dyn futures::Stream<Item = std::result::Result<Race, sqlx::Error>> + std::marker::Send>> = q.fetch(pool);
+    let rows = q.fetch(pool);
+
+    let mut races = rows.map(|r| r.unwrap()).collect::<Vec<Race>>().await;
+    let ret = races.pop();
+    if !races.is_empty() {
+        info!("Found multiple active races");
+        return None;
+    }
+    ret
+}
+
 // TODO: This creates a race with null message_id and state SCHEDULED, always. Is that bad?
 async fn create_race(
     game: &Game,
@@ -736,7 +906,6 @@ async fn create_race(
         }
     }
 }
-
 
 fn parse_time(time_str: &str) -> Option<DateTime<Tz>> {
     let normalized = time_str.to_ascii_lowercase();
@@ -780,129 +949,6 @@ async fn list_games(msg: &Box<MessageCreate>, bot_state: Arc<BotState>, pool: &S
         .content(contents)
         .unwrap()
         .await;
-}
-
-// Would love to have a real ORM... oh well
-// it's probably actually better to have id: Option<i64> so we can create models that aren't
-// DB-backed
-#[derive(Debug, PartialEq)]
-struct Game {
-    id: i64,
-    name: String,
-    name_pretty: String,
-}
-
-// TODO: hmmm... how to handle FKs? i think *for now* it's fine to just do stuff top down.
-//       probably eventually we want some kind of hydration
-
-#[derive(Debug, PartialEq)]
-struct Category {
-    id: i64,
-    game_id: i64,
-    name: String,
-    name_pretty: String,
-}
-
-#[derive(Debug, PartialEq)]
-enum RaceState {
-    SCHEDULED,
-    ACTIVE,
-    COMPLETED,
-}
-
-impl Display for RaceState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                RaceState::SCHEDULED => "SCHEDULED",
-                RaceState::ACTIVE => "ACTIVE",
-                RaceState::COMPLETED => "COMPLETED",
-            }
-        )
-    }
-}
-
-#[derive(Debug)]
-struct ParseError;
-impl Display for ParseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error")
-    }
-}
-impl Error for ParseError {}
-
-impl FromStr for RaceState {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "SCHEDULED" => Ok(RaceState::SCHEDULED),
-            "ACTIVE" => Ok(RaceState::ACTIVE),
-            "COMPLETED" => Ok(RaceState::COMPLETED),
-            _ => Err(ParseError),
-        }
-    }
-}
-
-model! {
-    #[derive(Debug, PartialEq)]
-    struct Race {
-        id: i64,
-        // N.B. game_id is not strictly necessary in this struct
-        game_id: i64,
-        category_id: i64,
-
-        /// use get/set_state() functions
-        state: String,
-
-        // Serialized as seconds-since-epoch
-        occurs: i64,
-
-        // message_id is a u64, which sqlx does not want to stick in Sqlite.
-        /// Use get/set_message_id() functions
-        scheduling_message_id: Option<String>,
-        // TODO: add active_message_id, rename above to scheduling_message_id
-
-        active_message_id: Option<String>,
-    }
-}
-
-impl Race {
-    fn get_scheduling_message_id(&self) -> Option<MessageId> {
-        match &self.scheduling_message_id {
-            Some(s) => match s.parse::<u64>() {
-                Ok(id) => Some(MessageId(id)),
-                Err(e) => {
-                    warn!("Error parsing message id {}: {}", s, e);
-                    None
-                }
-            },
-            None => None,
-        }
-    }
-
-    // TODO: figure out how to make this accept a string too?
-    fn set_scheduling_message_id(&mut self, id: MessageId) {
-        self.scheduling_message_id = Some(id.to_string());
-    }
-
-    fn get_occurs(&self) -> DateTime<Tz> {
-        unimplemented!()
-    }
-
-    fn set_occurs(&mut self, occurs: DateTime<Tz>) {
-        self.occurs = occurs.timestamp();
-    }
-
-    fn get_state(&self) -> RaceState {
-        RaceState::from_str(&self.state).unwrap()
-    }
-
-    fn set_state(&mut self, state: RaceState) {
-        self.state = state.to_string();
-    }
 }
 
 async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
@@ -1132,12 +1178,14 @@ async fn setup_roles(guild: &Box<GuildCreate>, bot_state: Arc<BotState>) {
     }
 }
 
+// some - maybe most - of this stuff should be in integration tests probably.
 #[cfg(test)]
 mod test {
     use crate::discord::{
-        create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time,
-        Race, RaceState,
+        create_race, get_category, get_game, get_pool, get_upcoming_races, parse_time, RaceState,
+        _end_race,
     };
+    use crate::models::Race;
     use chrono::{Datelike, Duration as CDuration, Local, NaiveDateTime, Timelike};
     use chrono_tz::US::Eastern;
     use sqlx::SqlitePool;
@@ -1203,7 +1251,7 @@ mod test {
         assert_eq!(race.occurs, when.timestamp());
         assert_eq!(race.category_id, c.id);
         assert_eq!(race.game_id, g.id);
-        assert_eq!(race.scheduling_message_id, None);
+        assert_eq!(race.get_scheduling_message_id(), None);
         assert_eq!(race.get_state(), RaceState::SCHEDULED);
         let mid = MessageId(u64::MAX);
         race.set_scheduling_message_id(mid);
@@ -1236,5 +1284,139 @@ mod test {
 
         let scheduled = get_upcoming_races(Duration::from_secs(120), &pool).await;
         assert_eq!(1, scheduled.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_by_id_inactive() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+        let mut r = create_race(&g, &c, Local::now().with_timezone(&Eastern), &pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            format!("{} is not currently active.", r),
+            _end_race(Some(r.id), &pool).await
+        );
+
+        r.set_state(RaceState::COMPLETED);
+        r.save(&pool).await;
+
+        assert_eq!(
+            format!("{} is not currently active.", r),
+            _end_race(Some(r.id), &pool).await
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_by_id_no_race() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        assert_eq!(
+            format!("No valid race found."),
+            _end_race(Some(1234), &pool).await
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_by_id_success() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+        let mut r = create_race(&g, &c, Local::now().with_timezone(&Eastern), &pool)
+            .await
+            .unwrap();
+
+        r.set_state(RaceState::ACTIVE);
+        r.save(&pool).await;
+
+        assert_eq!(
+            format!("{} completed.", r),
+            _end_race(Some(r.id), &pool).await
+        );
+
+        let refreshed = Race::get_by_id(r.id, &pool).await.unwrap();
+        assert_eq!(RaceState::COMPLETED, refreshed.get_state());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_currently_active() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+        let mut r = create_race(&g, &c, Local::now().with_timezone(&Eastern), &pool)
+            .await
+            .unwrap();
+
+        r.set_state(RaceState::ACTIVE);
+        r.save(&pool).await;
+
+        assert_eq!(
+            format!("{} completed.", r),
+            _end_race(None, &pool).await
+        );
+
+        let refreshed = Race::get_by_id(r.id, &pool).await.unwrap();
+        assert_eq!(RaceState::COMPLETED, refreshed.get_state());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_multiple_active() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        let g = get_game("alttp", &pool).await.unwrap();
+        let c = get_category(&g, "nmg", &pool).await.unwrap();
+        let mut r = create_race(&g, &c, Local::now().with_timezone(&Eastern), &pool)
+            .await
+            .unwrap();
+
+        r.set_state(RaceState::ACTIVE);
+        r.save(&pool).await;
+
+        let time_add = CDuration::from_std(Duration::from_secs(60)).unwrap();
+        let mut r2 = create_race(&g, &c, (Local::now() + time_add).with_timezone(&Eastern), &pool)
+            .await
+            .unwrap();
+
+        r2.set_state(RaceState::ACTIVE);
+        r2.save(&pool).await;
+
+        assert_eq!(
+            format!("No valid race found."),
+            _end_race(None, &pool).await
+        );
+
+        let refreshed = Race::get_by_id(r.id, &pool).await.unwrap();
+        assert_eq!(RaceState::ACTIVE, refreshed.get_state());
+        let refreshed2 = Race::get_by_id(r.id, &pool).await.unwrap();
+        assert_eq!(RaceState::ACTIVE, refreshed2.get_state());
+    }
+
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_end_race_none_active() {
+        init();
+        let pool = get_pool().await.unwrap();
+        initdb(&pool).await;
+
+        assert_eq!(
+            format!("No valid race found."),
+            _end_race(None, &pool).await
+        );
+
     }
 }

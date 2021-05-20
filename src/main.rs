@@ -2,8 +2,8 @@ use crate::constants::{CLIENT_ID, PERMISSIONS};
 use crate::discord::run_bot;
 
 mod constants;
-
 mod discord;
+mod models;
 
 extern crate chrono;
 extern crate chrono_tz;
