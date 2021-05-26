@@ -15,7 +15,7 @@ use twilight_http::{Client as HttpClient, Client};
 use twilight_model::gateway::payload::{GuildCreate, MessageCreate};
 use twilight_model::gateway::Intents;
 use twilight_model::guild::{Emoji, PartialMember, Permissions, Role};
-use twilight_model::id::{ChannelId, GuildId, MessageId, RoleId, UserId, EmojiId};
+use twilight_model::id::{ChannelId, EmojiId, GuildId, MessageId, RoleId, UserId};
 
 use crate::constants::{
     ACTIVE_CHANNEL_NAME, FOXLISK_USER_ID, NOTIFY_BEFORE_RACE_SECS, RACING_EMOJI_NAME,
@@ -48,6 +48,7 @@ struct BotState {
     emojis: RwLock<HashMap<String, Emoji>>,
     // TODO: this can't possibly be the best way to do this lol
     guild_id: RwLock<Option<GuildId>>,
+
 }
 
 enum Reactions {
@@ -226,6 +227,7 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         guild_id: Default::default(),
     });
 
+
     let foxhole_msgs = bot_state
         .http
         .channel_messages(ChannelId(842995854742913034))
@@ -381,6 +383,22 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 }
                 None => false,
             };
+
+            if do_nag {
+                debug!("Sending nag re: current race");
+                bot_state
+                    .http
+                    .create_message(active_channel)
+                    .content(format!(
+                         "<@&{}> You reported interest in the upcoming {} - {} race and have yet to confirm. \
+                        Please react above!" ,
+                        unconfirmed_racer_role.id,
+                        Game::get_by_id(race.game_id, &pool).await.unwrap().name_pretty,
+                        Category::get_by_id(race.category_id, &pool).await.unwrap().name_pretty
+                    ))
+                    .unwrap()
+                    .await
+            }
             debug!("Finished with active race");
         }
         debug!("Finished with active races");
@@ -824,7 +842,6 @@ async fn add_race(
                         r.save(pool).await;
                     }
 
-
                     let racer_react_type = {
                         let lock = bot_state.emojis.read().await;
                         match lock.get("raisinghand") {
@@ -832,25 +849,28 @@ async fn add_race(
                                 warn!("Can't find raising hand emoji");
                                 None
                             }
-                            Some(e) => {
-                                Some(ReactionType::Custom {
-                                    animated: false,
-                                    id: e.id,
-                                    name: Some(e.name.clone()),
-                                })
-
-                            }
+                            Some(e) => Some(ReactionType::Custom {
+                                animated: false,
+                                id: e.id,
+                                name: Some(e.name.clone()),
+                            }),
                         }
                     };
 
-                    for r in vec![racer_react_type, Some(Reactions::COMMENTATING.get_reaction_type()), Some(Reactions::RESTREAMING.get_reaction_type())] {
+                    for r in vec![
+                        racer_react_type,
+                        Some(Reactions::COMMENTATING.get_reaction_type()),
+                        Some(Reactions::RESTREAMING.get_reaction_type()),
+                    ] {
                         match r {
                             Some(reac) => {
-                                bot_state.http
-                                    .create_reaction(cid, ok.id, RequestReactionType::from(reac)).await;
-                            },
-                            None => {}
+                                bot_state
+                                    .http
+                                    .create_reaction(cid, ok.id, RequestReactionType::from(reac))
+                                    .await;
                             }
+                            None => {}
+                        }
                     }
                 }
                 Err(e) => {
@@ -940,9 +960,7 @@ async fn _add_race(
                 warn!("Can't find raising hand emoji");
                 (":thumbup:".to_owned(), EmojiId(0))
             }
-            Some(e) => {
-                ("raisinghand".to_string(), e.id)
-            }
+            Some(e) => ("raisinghand".to_string(), e.id),
         }
     };
 
@@ -958,12 +976,12 @@ If you are able to restream, react with :{}:
         game.name_pretty,
         cat.name_pretty,
         occurs.format("%A, %B %d at %I:%M%p %Z"),
-        racer_react_name, racer_react_id,
+        racer_react_name,
+        racer_react_id,
         Reactions::COMMENTATING.get_name(),
         Reactions::RESTREAMING.get_name(),
         r.id,
     );
-
 
     ("Race created!".to_string(), Some(schedule_content), Some(r))
 }
