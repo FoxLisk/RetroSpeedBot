@@ -48,7 +48,7 @@ struct BotState {
     emojis: RwLock<HashMap<String, Emoji>>,
     // TODO: this can't possibly be the best way to do this lol
     guild_id: RwLock<Option<GuildId>>,
-
+    racers: RwLock<HashMap<i64, HashSet<UserId>>>,
 }
 
 enum Reactions {
@@ -195,11 +195,6 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
                 | ResourceType::REACTION,
         )
         .build();
-    //
-    // bot_state
-    //     .http
-    //     .reactions(ChannelId(842995854742913034), MessageId(844810617646088192), RequestReactionType::Unicode {}
-    //     .await
 
     let mut command_config = CommandParserConfig::new();
 
@@ -225,14 +220,14 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
         channels: Default::default(),
         emojis: Default::default(),
         guild_id: Default::default(),
+        racers: Default::default(),
     });
 
-
-    let foxhole_msgs = bot_state
-        .http
-        .channel_messages(ChannelId(842995854742913034))
-        .await;
-    debug!("{:?}", foxhole_msgs);
+    // let foxhole_msgs = bot_state
+    //     .http
+    //     .channel_messages(ChannelId(842995854742913034))
+    //     .await;
+    // debug!("{:?}", foxhole_msgs);
 
     let pool = get_pool().await.unwrap();
 
@@ -333,8 +328,19 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
 
         let active_races = get_active_races(&pool).await;
 
-        for mut active_race in active_races {
+        for  active_race in active_races {
             debug!("Handling active race {}", active_race);
+
+            // races shouldn't last 3 hours!
+            // unless we start doing chrono trigger or something
+            let time_til_start = active_race.get_occurs() - start_time_eastern;
+            let minutes_til_start = time_til_start.num_minutes();
+            if time_til_start.num_hours() < -2 {
+                // long past
+                _end_race(Some(active_race.id), &pool, bot_state.clone()).await;
+                continue;
+            }
+
             let confirmed_reactions = match get_reactions_for(
                 bot_state.clone(),
                 active_channel,
@@ -349,24 +355,26 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 }
             };
 
-            for user in confirmed_reactions {
-                if user.id == bot_state.cache.current_user().unwrap().id {
+
+            let my_id = bot_state.cache.current_user().unwrap().id;
+
+            for user in &confirmed_reactions {
+                if user.id == my_id {
                     continue;
                 }
-                remove_role(&user, &unconfirmed_racer_role, bot_state.clone()).await;
+                remove_role(&user.id, &unconfirmed_racer_role, bot_state.clone()).await;
                 add_role(&user, &confirmed_racer_role, bot_state.clone()).await;
             }
-
-            // races shouldn't last 3 hours!
-            // unless we start doing chrono trigger or something
-            let time_til_start = active_race.get_occurs() - start_time_eastern;
-            let minutes_til_start = time_til_start.num_minutes();
-            if time_til_start.num_hours() < -2 {
-                // long past
-                active_race.set_state(RaceState::COMPLETED);
-                active_race.save(&pool).await;
-                continue;
+            {
+                let mut lock = bot_state.racers.write().await;
+                let set = lock.entry(active_race.id).or_insert(Default::default());
+                for user in &confirmed_reactions {
+                    if user.id != my_id {
+                        set.insert(user.id);
+                    }
+                }
             }
+
 
             if !sent_nags.contains(&active_race.id) {
                 sent_nags.put(active_race.id, nag_times(time_til_start.num_minutes()));
@@ -393,11 +401,11 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                          "<@&{}> You reported interest in the upcoming {} - {} race and have yet to confirm. \
                         Please react above!" ,
                         unconfirmed_racer_role.id,
-                        Game::get_by_id(race.game_id, &pool).await.unwrap().name_pretty,
-                        Category::get_by_id(race.category_id, &pool).await.unwrap().name_pretty
+                        Game::get_by_id(active_race.game_id, &pool).await.unwrap().name_pretty,
+                        Category::get_by_id(active_race.category_id, &pool).await.unwrap().name_pretty
                     ))
                     .unwrap()
-                    .await
+                    .await;
             }
             debug!("Finished with active race");
         }
@@ -456,11 +464,22 @@ async fn handle_upcoming_race(
         }
     };
 
-    for user in racing_reactions {
-        if user.id == bot_state.cache.current_user().unwrap().id {
+    let my_id = bot_state.cache.current_user().unwrap().id;
+
+    for user in &racing_reactions {
+        if user.id == my_id {
             continue;
         }
-        add_role(&user, &unconfirmed_racer_role, bot_state.clone()).await;
+        add_role(user, &unconfirmed_racer_role, bot_state.clone()).await;
+    }
+    {
+        let mut lock = bot_state.racers.write().await;
+        let set = lock.entry(race.id).or_insert(Default::default());
+        for user in &racing_reactions {
+            if user.id != my_id {
+                set.insert(user.id);
+            }
+        }
     }
 
     match bot_state
@@ -509,6 +528,20 @@ async fn add_role(user: &User, role: &Role, bot_state: Arc<BotState>) -> Result<
             });
         }
     };
+
+    if let Some(has_role) = bot_state
+        .cache
+        .member(gid.clone(), user.id.clone())
+        .map(|m| m.roles.contains(&role.id))
+    {
+        debug!("add_role: roles, found present: {}", has_role);
+        if has_role {
+            return Ok(());
+        }
+    } else {
+        debug!("add_role: no existing roles found");
+    }
+
     match bot_state
         .http
         .add_guild_member_role(gid, user.id, role.id.clone())
@@ -526,7 +559,7 @@ async fn add_role(user: &User, role: &Role, bot_state: Arc<BotState>) -> Result<
 
 // this should take GuildId but since this is single-guild for now we can sneak it off of the role
 async fn remove_role(
-    user: &User,
+    user_id: &UserId,
     role: &Role,
     bot_state: Arc<BotState>,
 ) -> Result<(), AddRoleError> {
@@ -538,9 +571,23 @@ async fn remove_role(
             });
         }
     };
+
+    if let Some(has_role) = bot_state
+        .cache
+        .member(gid.clone(), user_id.clone())
+        .map(|m| m.roles.contains(&role.id))
+    {
+        debug!("remove_role: roles, found present: {}", has_role);
+        if !has_role {
+            return Ok(());
+        }
+    } else {
+        debug!("remove_role: no existing roles found");
+    }
+
     match bot_state
         .http
-        .remove_guild_member_role(gid, user.id, role.id.clone())
+        .remove_guild_member_role(gid, user_id.clone(), role.id.clone())
         .await
     {
         Ok(()) => Ok(()),
@@ -635,6 +682,7 @@ async fn handle_event(
             {
                 let mut lock = bot_state.guild_id.write().await;
                 *lock = Some(msg.id.clone());
+                debug!("Set guild id to {}", msg.id);
             }
             setup_roles(&msg, bot_state.clone()).await;
             setup_channels(&msg, bot_state.clone()).await;
@@ -1004,7 +1052,7 @@ async fn end_race(
         bot_state
             .http
             .create_message(msg.channel_id)
-            .content("You are not authorized to create races.")
+            .content("You are not authorized to end races.")
             .unwrap()
             .await;
         return;
@@ -1023,7 +1071,9 @@ async fn end_race(
         None => None,
     };
 
-    let content = _end_race(id, pool).await;
+    let content = _end_race(id, pool, bot_state.clone()).await;
+
+
 
     bot_state
         .http
@@ -1033,7 +1083,7 @@ async fn end_race(
         .await;
 }
 
-async fn _end_race(oid: Option<i64>, pool: &SqlitePool) -> String {
+async fn _end_race(oid: Option<i64>, pool: &SqlitePool, bot_state: Arc<BotState>) -> String {
     let orace = match oid {
         Some(rid) => Race::get_by_id(rid, pool).await,
         None => get_active_race(pool).await,
@@ -1044,7 +1094,29 @@ async fn _end_race(oid: Option<i64>, pool: &SqlitePool) -> String {
             RaceState::ACTIVE => {
                 race.set_state(RaceState::COMPLETED);
                 race.save(pool).await;
+                if let Some(real_id) = oid {
+
+                    let mut roles_to_remove = vec![];
+                    if let Some(unconfirmed_racer_role) = bot_state.get_role("unconfirmed-racer").await {
+                        roles_to_remove.push(unconfirmed_racer_role);
+                    }
+                    if let Some(confirmed_racer_role) = bot_state.get_role("active-racer").await {
+                        roles_to_remove.push(confirmed_racer_role);
+                    }
+                    let mut lock = bot_state.racers.write().await;
+
+                    if let Some(set) = lock.get_mut(&real_id) {
+
+                        for user in set.iter() {
+                            for role in &roles_to_remove {
+                                remove_role(user, role, bot_state.clone()).await;
+                            }
+                        }
+                    }
+                }
+
                 format!("{} completed.", race)
+
             }
             _ => {
                 format!("{} is not currently active.", race)

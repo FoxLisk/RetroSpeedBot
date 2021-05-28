@@ -51,15 +51,15 @@ and sends them back to discord. the point here being to separate out the DB acce
 
 ## critical path TODOs:
 
- * remove uncomfirmed/active-* roles
-   * this is going to require tracking who has them, or else periodically pulling the full server list and
-   * cleaning house.
  * get it running on linux (hopefully (*gulp*) this is easy)
  * races should have a notes field - stuff like "for new runners".
  * a command to delete a race
 
 ## misc TODOs - not any special order:
 
+ * we should handle some kind of discord state cleanup, eventually, i think.
+   for now if the bot crashes or restarts or whatever, roles will get out of sync, etc.
+   * maybe just some kind of message that's like "react here to cleanse yourself of roles"
  * Handle any kind of internet outage? idk if it's worth it vs just restarting *shrug*
  * Rate limit the bot
  * ORM stuff is looking more and more desireable
