@@ -8,6 +8,8 @@ async fn main() {
     println!("cargo:rerun-if-changed=migrations/");
     println!("cargo:rerun-if-changed=test_db.db3");
     // TODO: maybe a nicer error lol
+    // TODO: this kind of sucks for portability. making some way to run migrations without running
+    //       the build seems like a good value add.
     let sqlite_db_path = dotenv::var("DATABASE_URL").unwrap();
     // use a SqliteConnectOptions instead of a hardcoded queryparam?
     let path_with_params = format!("{}?mode=rwc", sqlite_db_path);
