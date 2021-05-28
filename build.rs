@@ -10,6 +10,11 @@ async fn main() {
     // TODO: maybe a nicer error lol
     // TODO: this kind of sucks for portability. making some way to run migrations without running
     //       the build seems like a good value add.
+    //       the problem is that these are specified _at compile time_, so you have to build
+    //       with DATABASE_URL=/the/prod/db in order to run migrations.
+    //       OTOH if you _don't_ do them at build time I'm pretty sure the sqlx::query! macros
+    //       in the main code fail to compile. maybe we can't use the macros after all?
+    //       i'm not really sure what the best path is here.
     let sqlite_db_path = dotenv::var("DATABASE_URL").unwrap();
     // use a SqliteConnectOptions instead of a hardcoded queryparam?
     let path_with_params = format!("{}?mode=rwc", sqlite_db_path);

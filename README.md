@@ -60,13 +60,15 @@ and sends them back to discord. the point here being to separate out the DB acce
  * we should handle some kind of discord state cleanup, eventually, i think.
    for now if the bot crashes or restarts or whatever, roles will get out of sync, etc.
    * maybe just some kind of message that's like "react here to cleanse yourself of roles"
+ * handle database migrations much better (see note in build.rs)
+ * try to reduce dependencies? release builds take forever.
+   * could just use debug builds tbh, performance isn't gonna matter
+   * might be able to toggle off a bunch of features anyway
  * Handle any kind of internet outage? idk if it's worth it vs just restarting *shrug*
  * Rate limit the bot
  * ORM stuff is looking more and more desireable
    * OMFG look into this!!! https://docs.rs/ormx/0.7.0/ormx/
    * the documentation is - of course! - a total joke, but maybe very useful.
- * keeping some stuff in memory would probably be cool, although N ~= 1 for a long time so it shouldn't matter. Things
-   like races should be cheap enough to store in memory and then mega fast to iterate over, if we wanted.
  * bot commands to manipulate games/categories instead of "tell a dev and get it added to the build script"
  * 80 trillion unit tests, ideally
  * this list itself should be in github maybe
