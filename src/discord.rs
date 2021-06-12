@@ -253,7 +253,18 @@ custom_error! { MigrationError{err: String} = "Error adding role to user: {err}"
 
 
 async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrationError>{
-    let migrator = Migrator::new(Path::new("./migrations")).await.unwrap();
+    let migrations_dir = match dotenv::var("MIGRATION_DIR") {
+        Ok(dir) => dir,
+        Err(e) => {
+            return Err(MigrationError{err: "MIGRATION_DIR not found in environment".to_string()});
+        }
+    };
+    let migrator = match Migrator::new(Path::new(&migrations_dir)).await {
+      Ok(m) => m,
+        Err(e) => {
+            return Err(MigrationError{err: format!("Error creating migrator: {:?}", e)});
+        }
+    };
 
     let migrated = migrator.run(pool).await;
     match migrated {
