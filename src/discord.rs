@@ -328,7 +328,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
 
         let active_races = get_active_races(&pool).await;
 
-        for  active_race in active_races {
+        for active_race in active_races {
             debug!("Handling active race {}", active_race);
 
             // races shouldn't last 3 hours!
@@ -340,11 +340,16 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 _end_race(Some(active_race.id), &pool, bot_state.clone()).await;
                 continue;
             }
+            let active_message_id = active_race.get_active_message_id();
+            if active_message_id.is_none() {
+                warn!("Race {} is supposed to have an active message id but doesn't", race.id);
+                continue;
+            }
 
             let confirmed_reactions = match get_reactions_for(
                 bot_state.clone(),
                 active_channel,
-                active_race.get_active_message_id().unwrap(),
+                active_message_id.unwrap(),
                 Reactions::CONFIRMING.get_reaction_type(),
             )
             .await
@@ -354,7 +359,6 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                     continue;
                 }
             };
-
 
             let my_id = bot_state.cache.current_user().unwrap().id;
 
@@ -374,7 +378,6 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                     }
                 }
             }
-
 
             if !sent_nags.contains(&active_race.id) {
                 sent_nags.put(active_race.id, nag_times(time_til_start.num_minutes()));
@@ -409,7 +412,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
             }
             debug!("Finished with active race");
         }
-        debug!("Finished with active races");
+        debug!("Finished with all active races");
     }
 }
 
@@ -523,6 +526,7 @@ async fn add_role(user: &User, role: &Role, bot_state: Arc<BotState>) -> Result<
     let gid = match bot_state.get_guild_id().await {
         Some(g) => g,
         None => {
+            debug!("can't find guild id in add_role");
             return Err(AddRoleError {
                 err: "Cant find guild id???".to_string(),
             });
@@ -566,6 +570,7 @@ async fn remove_role(
     let gid = match bot_state.get_guild_id().await {
         Some(g) => g,
         None => {
+            debug!("Can't find guild id in remove_role");
             return Err(AddRoleError {
                 err: "Cant find guild id???".to_string(),
             });
@@ -1073,8 +1078,6 @@ async fn end_race(
 
     let content = _end_race(id, pool, bot_state.clone()).await;
 
-
-
     bot_state
         .http
         .create_message(msg.channel_id)
@@ -1095,9 +1098,10 @@ async fn _end_race(oid: Option<i64>, pool: &SqlitePool, bot_state: Arc<BotState>
                 race.set_state(RaceState::COMPLETED);
                 race.save(pool).await;
                 if let Some(real_id) = oid {
-
                     let mut roles_to_remove = vec![];
-                    if let Some(unconfirmed_racer_role) = bot_state.get_role("unconfirmed-racer").await {
+                    if let Some(unconfirmed_racer_role) =
+                        bot_state.get_role("unconfirmed-racer").await
+                    {
                         roles_to_remove.push(unconfirmed_racer_role);
                     }
                     if let Some(confirmed_racer_role) = bot_state.get_role("active-racer").await {
@@ -1106,7 +1110,6 @@ async fn _end_race(oid: Option<i64>, pool: &SqlitePool, bot_state: Arc<BotState>
                     let mut lock = bot_state.racers.write().await;
 
                     if let Some(set) = lock.get_mut(&real_id) {
-
                         for user in set.iter() {
                             for role in &roles_to_remove {
                                 remove_role(user, role, bot_state.clone()).await;
@@ -1116,7 +1119,6 @@ async fn _end_race(oid: Option<i64>, pool: &SqlitePool, bot_state: Arc<BotState>
                 }
 
                 format!("{} completed.", race)
-
             }
             _ => {
                 format!("{} is not currently active.", race)

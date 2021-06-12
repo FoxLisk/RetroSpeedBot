@@ -54,6 +54,12 @@ and sends them back to discord. the point here being to separate out the DB acce
  * get it running on linux (hopefully (*gulp*) this is easy)
  * races should have a notes field - stuff like "for new runners".
  * a command to delete a race
+ * make the confirmation message date format friendlier
+ 
+## Known bugs:
+
+ * unconfirmed-racer role not removed correctly when you get active-racer role
+ * I don't think _any_ logs from the `cron` thread are making it to the systemctl output??
 
 ## misc TODOs - not any special order:
 
