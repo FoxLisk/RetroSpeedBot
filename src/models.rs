@@ -61,7 +61,6 @@ impl FromStr for RaceState {
 // it's probably actually better to have id: Option<i64> so we can create models that aren't
 // DB-backed
 model! {
-#[derive(Debug, PartialEq)]
 pub(crate) struct Game {
     pub(crate)   id: i64,
     pub(crate)   name: String,
@@ -70,7 +69,6 @@ pub(crate) struct Game {
 }
 
 model! {
-#[derive(Debug, PartialEq)]
 pub(crate) struct Category {
     pub(crate)   id: i64,
     pub(crate)   game_id: i64,
@@ -80,7 +78,6 @@ pub(crate) struct Category {
 }
 
 model! {
-#[derive(Debug, PartialEq)]
 pub(crate) struct Race {
     pub(crate) id: i64,
     // N.B. game_id is not strictly necessary in this struct

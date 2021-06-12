@@ -28,7 +28,7 @@ use chrono_tz::Tz;
 use chrono_tz::US::Eastern;
 use futures::TryStreamExt;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, Row};
 use std::iter::FromIterator;
 use tokio::time::Duration;
 use twilight_model::channel::{ChannelType, ReactionType};
@@ -36,6 +36,9 @@ use twilight_model::user::User;
 
 use crate::models::{Category, Game, Race, RaceState};
 use lru::LruCache;
+use sqlx::migrate::Migrator;
+use std::path::Path;
+use std::convert::TryFrom;
 
 struct BotState {
     http: Client,
@@ -230,6 +233,13 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
     // debug!("{:?}", foxhole_msgs);
 
     let pool = get_pool().await.unwrap();
+    match run_migrations(&pool).await {
+        Ok(()) => {},
+        Err(e) => {
+            error!("{}", e);
+            return Err(Box::new(e));
+        }
+    }
 
     let jh = tokio::spawn(handle_events(bot_state.clone(), pool.clone()));
     let cjh = tokio::spawn(cron(bot_state.clone(), pool.clone()));
@@ -237,6 +247,22 @@ pub async fn run_bot() -> Result<(), Box<dyn Error + Send + Sync>> {
     jh.await.unwrap().unwrap();
     cjh.await.unwrap();
     Ok(())
+}
+
+
+custom_error! { MigrationError{err: String} = "Error adding role to user: {err}" }
+
+
+async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrationError>{
+    let migrator = Migrator::new(Path::new("./migrations")).await.unwrap();
+
+    let migrated = migrator.run(pool).await;
+    match migrated {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            Err(MigrationError { err: format!("Error running migrations: {:?}", e) })
+        }
+    }
 }
 
 async fn get_pool() -> Result<SqlitePool, sqlx::Error> {
@@ -342,7 +368,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
             }
             let active_message_id = active_race.get_active_message_id();
             if active_message_id.is_none() {
-                warn!("Race {} is supposed to have an active message id but doesn't", race.id);
+                warn!("Race {} is supposed to have an active message id but doesn't", active_race.id);
                 continue;
             }
 
@@ -1143,7 +1169,7 @@ async fn get_active_race(pool: &SqlitePool) -> Option<Race> {
 /// Gets all currently active races.
 async fn get_active_races(pool: &SqlitePool) -> Vec<Race> {
     let state = RaceState::ACTIVE.to_string();
-    let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE state = ?", state);
+    let q = sqlx::query_as::<_, Race>("SELECT * FROM race WHERE state = ?").bind(state);
     let rows = q.fetch(pool);
 
     rows.map(|r| r.unwrap()).collect::<Vec<Race>>().await
@@ -1158,12 +1184,13 @@ async fn create_race(
 ) -> Option<Race> {
     let ts = occurs.timestamp();
     let state = RaceState::SCHEDULED.to_string();
-    let q = sqlx::query!("INSERT INTO race (game_id, category_id, occurs, state) VALUES (?, ?, ?, ?); SELECT last_insert_rowid() as rowid;", game.id, category.id, ts, state);
+    let q = sqlx::query(
+        "INSERT INTO race (game_id, category_id, occurs, state) VALUES (?, ?, ?, ?); \
+        SELECT last_insert_rowid() as rowid;").bind(game.id).bind(category.id).bind(ts).bind(state.clone());
     match q.fetch_one(pool).await {
         Ok(e) => {
-            debug!("create_race got me a {:?}", e);
             Some(Race {
-                id: e.rowid as i64,
+                id: e.get::<i64, &str>("rowid") as i64,
                 game_id: game.id,
                 category_id: category.id,
                 occurs: ts,
@@ -1224,11 +1251,9 @@ async fn list_games(msg: &Box<MessageCreate>, bot_state: Arc<BotState>, pool: &S
 }
 
 async fn get_game(name: &str, pool: &SqlitePool) -> Option<Game> {
-    let q = sqlx::query_as!(
-        Game,
+    let q = sqlx::query_as::<_, Game>(
         "SELECT id, name, name_pretty FROM game WHERE name = ?",
-        name
-    );
+    ).bind(name);
     match q.fetch_one(pool).await {
         Ok(r) => Some(r),
         Err(e) => {
@@ -1243,12 +1268,9 @@ async fn get_category(game: &Game, name: &str, pool: &SqlitePool) -> Option<Cate
         "Getting category {} for game (name {} id {}) ",
         name, game.name, game.id
     );
-    let q = sqlx::query_as!(
-        Category,
+    let q = sqlx::query_as::<_, Category>(
         "SELECT id, game_id, name, name_pretty FROM category WHERE name = ? AND game_id = ?",
-        name,
-        game.id,
-    );
+    ).bind(name).bind(game.id);
 
     match q.fetch_one(pool).await {
         Ok(r) => Some(r),
@@ -1260,7 +1282,7 @@ async fn get_category(game: &Game, name: &str, pool: &SqlitePool) -> Option<Cate
 }
 
 async fn get_games(pool: &SqlitePool) -> Vec<Game> {
-    let q = sqlx::query_as!(Game, "SELECT id, name, name_pretty FROM game");
+    let q = sqlx::query_as::<_, Game>("SELECT id, name, name_pretty FROM game");
     let mut rows = q.fetch(pool);
     let mut games = vec![];
     while let r = rows.try_next().await {
@@ -1287,11 +1309,9 @@ async fn get_categories(game: &Game, pool: &SqlitePool) -> Vec<Category> {
         "Getting categories for game (name {} id {})",
         game.name, game.id
     );
-    let q = sqlx::query_as!(
-        Category,
+    let q = sqlx::query_as::<_, Category>(
         "SELECT id, game_id, name, name_pretty  FROM category WHERE game_id = ?",
-        game.id
-    );
+    ).bind(game.id);
     let mut rows = q.fetch(pool);
     let mut categories = vec![];
     while let r = rows.try_next().await {
@@ -1317,13 +1337,9 @@ async fn get_upcoming_races(window: Duration, pool: &SqlitePool) -> Vec<Race> {
     let now = Local::now().timestamp();
     let until = (Local::now() + CDuration::from_std(window).unwrap()).timestamp();
     let state = RaceState::SCHEDULED.to_string();
-    let q = sqlx::query_as!(
-        Race,
+    let q = sqlx::query_as::<_, Race>(
         "SELECT * FROM race WHERE state = ? and occurs > ? and occurs < ?",
-        state,
-        now,
-        until
-    );
+    ).bind(state).bind(now).bind(until);
     let mut rows = q.fetch(pool);
     let mut races = vec![];
     while let r = rows.try_next().await {
@@ -1581,7 +1597,7 @@ mod test {
 
         // it would be reasonable to add a get_race_by_id() kind of message, but I don't think it's
         // actually useful yet.
-        let q = sqlx::query_as!(Race, "SELECT * FROM race WHERE id = ?", race.id);
+        let q = sqlx::query_as::<_, Race>("SELECT * FROM race WHERE id = ?").bind(race.id);
         let race_refreshed = q.fetch_one(&pool).await.unwrap();
         assert_eq!(race, race_refreshed);
     }

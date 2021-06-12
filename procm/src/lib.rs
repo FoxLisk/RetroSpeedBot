@@ -37,6 +37,8 @@ pub fn model(input: TokenStream) -> TokenStream {
     let query_str = format!("SELECT * FROM {} WHERE id = ?", name);
 
     let expanded = quote! {
+        #[derive(sqlx::FromRow)]
+        #[derive(Debug, PartialEq)]
         #tokens
 
         impl #name {
