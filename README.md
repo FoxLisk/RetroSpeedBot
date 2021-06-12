@@ -51,7 +51,6 @@ and sends them back to discord. the point here being to separate out the DB acce
 
 ## critical path TODOs:
 
- * get it running on linux (hopefully (*gulp*) this is easy)
  * races should have a notes field - stuff like "for new runners".
  * a command to delete a race
  * make the confirmation message date format friendlier

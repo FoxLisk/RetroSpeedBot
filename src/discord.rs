@@ -38,7 +38,6 @@ use crate::models::{Category, Game, Race, RaceState};
 use lru::LruCache;
 use sqlx::migrate::Migrator;
 use std::path::Path;
-use std::convert::TryFrom;
 
 struct BotState {
     http: Client,
@@ -281,8 +280,8 @@ fn nag_times(max: i64) -> Vec<i64> {
     // must go from smallest to largest
     // i.e. vec![15, 30] means racers should be alerted once at 30 minutes-to-race-time and again
     // at 15-minutes-to-race-time
-    // let times = vec![15, 30];
-    let times = vec![1, 4];
+    let times = vec![15, 30, 60];
+    // let times = vec![1, 4];
     times.into_iter().take_while(|i| *i < max).collect()
 }
 
@@ -392,6 +391,7 @@ async fn cron(bot_state: Arc<BotState>, pool: SqlitePool) {
                 if user.id == my_id {
                     continue;
                 }
+                debug!("Removing unconfirmed role and setting active role for {}", user.name);
                 remove_role(&user.id, &unconfirmed_racer_role, bot_state.clone()).await;
                 add_role(&user, &confirmed_racer_role, bot_state.clone()).await;
             }
@@ -515,11 +515,11 @@ async fn handle_upcoming_race(
         .http
         .create_message(active_channel)
         .content(format!(
-            "<@&{}> You reported interest in the {} - {} race at {}. React with :{}: to confirm please.",
+            "<@&{}> You reported interest in the {} - {} race on {}. React with :{}: to confirm please.",
             unconfirmed_racer_role.id,
             Game::get_by_id(race.game_id, pool).await.unwrap().name_pretty,
             Category::get_by_id(race.category_id, pool).await.unwrap().name_pretty,
-            race.get_occurs(),
+            race.get_occurs().format("%B %d at %I:%M%P"),
             Reactions::CONFIRMING.get_name()
         ))
         .unwrap()
