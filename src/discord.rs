@@ -569,19 +569,19 @@ async fn add_role(user: &User, role: &Role, bot_state: Arc<BotState>) -> Result<
             });
         }
     };
-
-    if let Some(has_role) = bot_state
-        .cache
-        .member(gid.clone(), user.id.clone())
-        .map(|m| m.roles.contains(&role.id))
-    {
-        debug!("add_role: roles, found present: {}", has_role);
-        if has_role {
-            return Ok(());
-        }
-    } else {
-        debug!("add_role: no existing roles found");
-    }
+    //
+    // if let Some(has_role) = bot_state
+    //     .cache
+    //     .member(gid.clone(), user.id.clone())
+    //     .map(|m| m.roles.contains(&role.id))
+    // {
+    //     debug!("add_role: roles, found present: {}", has_role);
+    //     if has_role {
+    //         return Ok(());
+    //     }
+    // } else {
+    //     debug!("add_role: no existing roles found");
+    // }
 
     match bot_state
         .http
