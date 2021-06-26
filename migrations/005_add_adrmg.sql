@@ -1,0 +1,1 @@
+INSERT INTO category (game_id, name, name_pretty) VALUES (1, "ad_rmg", "All Dungeons RMG");
