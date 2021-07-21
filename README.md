@@ -81,3 +81,5 @@ and sends them back to discord. the point here being to separate out the DB acce
  * scheduled races would be cool
  * can we move people into appropriate voice chats?
    * should we?
+
+## YOU JUST LOST THE GAME
