@@ -1054,6 +1054,10 @@ async fn _add_race(
         }
     };
 
+    fn datetime_to_discord_format(datetime: &DateTime<Tz>) -> String {
+        format!("<t:{}:F>", datetime.timestamp())
+    }
+
     let schedule_content = format!(
         "There will be a race of {} - {} on {}.
 
@@ -1065,7 +1069,7 @@ If you are able to restream, react with :{}:
 ",
         game.name_pretty,
         cat.name_pretty,
-        occurs.format("%A, %B %d at %I:%M%p %Z"),
+        datetime_to_discord_format(&occurs),
         racer_react_name,
         racer_react_id,
         Reactions::COMMENTATING.get_name(),
