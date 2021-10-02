@@ -1059,7 +1059,7 @@ async fn _add_race(
     }
 
     let schedule_content = format!(
-        "There will be a race of {} - {} on {}.
+        "There will be a race of {} - {} on {} (note that this time is *already localized for you*).
 
 If you are interested in racing, react with <:{}:{}>
 If you are available to commentate, react with :{}:
