@@ -18,18 +18,13 @@ For debugging. `RUST_LOG` is for the `env_logger` library.
 
 # Basic Structure
 
-`build.rs` is a build script that is called at the beginning of compilation. This is required to set up database state.
-See [sqlx migration documentation](https://docs.rs/sqlx/0.5.2/sqlx/migrate/struct.Migrator.html) or the [more-useful examples](
-https://github.com/launchbadge/sqlx/tree/master/examples/sqlite/todos). It is current practice to wipe and rebuild the db
-whenever I feel like it in testing.
-
 `main.rs` is a very thin hub. It should do as little as possible to set tokio threads working.
 
 `discord.rs` is handling all of the discord bot stuff right now. This should be split up into modules probably but I
 haven't bothered yet. The main things are:
 
 1. `run_bot()` - the entry point. This sets up various state and then starts the main event handling loops
-1. `cron()` - this is a stub, but the point is to, every $DURATION, check if any stuff needs to be handled - if there's
+1. `cron()` - every $DURATION, check if any stuff needs to be handled - if there's
    a race coming up that we should assign roles for, if people need to be pinged, etc.
 1. `handle_events()` - this is the discord-event handler. It eventually dispatches into `handle_event` where most of the
    important stuff is handling `MessageCreate`s. 
@@ -57,7 +52,7 @@ and sends them back to discord. the point here being to separate out the DB acce
  
 ## Known bugs:
 
- * unconfirmed-racer role not removed correctly when you get active-racer role
+ * unconfirmed-racer role not removed correctly when you get active-racer role (?? is this fixed maybe?)
  * I don't think _any_ logs from the `cron` thread are making it to the systemctl output??
 
 ## misc TODOs - not any special order:
@@ -65,7 +60,6 @@ and sends them back to discord. the point here being to separate out the DB acce
  * we should handle some kind of discord state cleanup, eventually, i think.
    for now if the bot crashes or restarts or whatever, roles will get out of sync, etc.
    * maybe just some kind of message that's like "react here to cleanse yourself of roles"
- * handle database migrations much better (see note in build.rs)
  * try to reduce dependencies? release builds take forever.
    * could just use debug builds tbh, performance isn't gonna matter
    * might be able to toggle off a bunch of features anyway
@@ -74,7 +68,7 @@ and sends them back to discord. the point here being to separate out the DB acce
  * ORM stuff is looking more and more desireable
    * OMFG look into this!!! https://docs.rs/ormx/0.7.0/ormx/
    * the documentation is - of course! - a total joke, but maybe very useful.
- * bot commands to manipulate games/categories instead of "tell a dev and get it added to the build script"
+ * bot commands to manipulate games/categories instead of "tell a dev and get it added to the migrations dir"
  * 80 trillion unit tests, ideally
  * this list itself should be in github maybe
  * racetime.gg integration would be cool
