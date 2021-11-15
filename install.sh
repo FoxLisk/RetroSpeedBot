@@ -1,4 +1,4 @@
-SERVICE_PATH="/lib/systemd/system/retro_speed_bot"
+SERVICE_PATH="/lib/systemd/system/retro_speed_bot.service"
 cp target/debug/retro_speed_bot /usr/bin/retro_speed_bot
 if test -f /lib/systemd/system/retro_speed_bot.service;
 then
