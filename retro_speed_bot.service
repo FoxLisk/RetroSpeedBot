@@ -1,0 +1,16 @@
+[Unit]
+Description=RetroSpeedBot
+
+[Service]
+Environment="DATABASE_URL=/opt/retrospeedbot.db3"
+Environment="DISCORD_TOKEN=$TOKEN"
+Environment="RUST_BACKTRACE=full"
+Environment="RUST_LOG=retro_speed_bot=Debug"
+Environment="MIGRATION_DIR=/home/centos/retrospeedbot/migrations"
+StandardOutput="/var/log/retrospeedbot.log"
+StandardError="/var/log/retrospeedbot.log"
+ExecStart=/usr/bin/retro_speed_bot
+
+[Install]
+WantedBy=multi-user.target
+
