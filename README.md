@@ -54,6 +54,7 @@ and sends them back to discord. the point here being to separate out the DB acce
 
  * unconfirmed-racer role not removed correctly when you get active-racer role (?? is this fixed maybe?)
  * I don't think _any_ logs from the `cron` thread are making it to the systemctl output??
+ * The model macros require a database to already exist and be migrated at compile time, which makes building this on a new server bad.
 
 ## misc TODOs - not any special order:
 
