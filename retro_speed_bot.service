@@ -7,8 +7,8 @@ Environment="DISCORD_TOKEN=$TOKEN"
 Environment="RUST_BACKTRACE=full"
 Environment="RUST_LOG=retro_speed_bot=Debug"
 Environment="MIGRATION_DIR=/home/centos/retrospeedbot/migrations"
-StandardOutput="/var/log/retrospeedbot.log"
-StandardError="/var/log/retrospeedbot.log"
+StandardOutput=append:/var/log/retro_speed_bot.log
+StandardError=append:/var/log/retro_speed_bot.log
 ExecStart=/usr/bin/retro_speed_bot
 
 [Install]
